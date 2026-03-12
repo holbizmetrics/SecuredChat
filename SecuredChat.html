@@ -16,6 +16,9 @@
     <!-- DOMPurify (XSS protection) -->
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 
+    <!-- Lottie (animated stickers) -->
+    <script src="https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js"></script>
+
     <style>
         * {
             margin: 0;
@@ -1068,9 +1071,20 @@
         .emoji-grid button:hover { background: #f0f2ff; }
 
         .emoji-grid .sticker-btn {
-            width: 48px;
-            height: 48px;
+            width: 64px;
+            height: 64px;
             font-size: 2rem;
+            position: relative;
+        }
+
+        .message .sticker-container {
+            width: 150px;
+            height: 150px;
+        }
+
+        .message .sticker-container svg {
+            max-width: 100%;
+            max-height: 100%;
         }
 
         /* --- Export Menu --- */
@@ -1821,9 +1835,19 @@
                 document.getElementById('emojiGrid').addEventListener('click', (e) => {
                     const btn = e.target.closest('button');
                     if (!btn) return;
+
+                    // Lottie sticker — send as sticker message
+                    if (btn.dataset.stickerId !== undefined) {
+                        this.sendSticker(parseInt(btn.dataset.stickerId));
+                        document.getElementById('emojiPicker').classList.add('hidden');
+                        return;
+                    }
+
+                    // Regular emoji — insert into textarea
                     const ta = document.getElementById('messageInput');
                     const pos = ta.selectionStart;
                     const emoji = btn.dataset.emoji;
+                    if (!emoji) return;
                     ta.value = ta.value.substring(0, pos) + emoji + ta.value.substring(pos);
                     ta.setSelectionRange(pos + emoji.length, pos + emoji.length);
                     ta.focus();
@@ -2000,9 +2024,316 @@
 
             // --- Emoji picker data ---
 
+            // Lottie sticker factory: each function returns a minimal Lottie JSON
+            getLottieStickers() {
+                const S = 128; // canvas size
+                const C = S / 2; // center
+
+                // Helper: create a shape layer with keyframed transform
+                const makeLayer = (name, shapes, ks) => ({
+                    ty: 4, nm: name, ip: 0, op: 60, st: 0,
+                    ks: { o: { a: 0, k: 100 }, r: ks.r || { a: 0, k: 0 },
+                          p: ks.p || { a: 0, k: [C, C, 0] },
+                          a: { a: 0, k: [0, 0, 0] },
+                          s: ks.s || { a: 0, k: [100, 100, 100] } },
+                    shapes: shapes
+                });
+
+                // Helper: ellipse shape group
+                const ellipse = (cx, cy, rx, ry, fill) => ([
+                    { ty: 'el', p: { a: 0, k: [cx, cy] }, s: { a: 0, k: [rx * 2, ry * 2] } },
+                    { ty: 'fl', c: { a: 0, k: fill }, o: { a: 0, k: 100 } }
+                ]);
+
+                // Helper: rect shape group
+                const rect = (x, y, w, h, fill, r) => ([
+                    { ty: 'rc', p: { a: 0, k: [x, y] }, s: { a: 0, k: [w, h] }, r: { a: 0, k: r || 0 } },
+                    { ty: 'fl', c: { a: 0, k: fill }, o: { a: 0, k: 100 } }
+                ]);
+
+                const wrap = (layers) => ({
+                    v: '5.7.4', fr: 30, ip: 0, op: 60, w: S, h: S, layers
+                });
+
+                // Easing shorthand
+                const ease = { i: { x: [0.4], y: [1] }, o: { x: [0.6], y: [0] } };
+
+                return [
+                    // 0: Pulsing Heart
+                    { name: 'Heart', data: wrap([makeLayer('heart',
+                        [{ ty: 'sh', ks: { a: 0, k: { c: true, v: [[0,-20],[20,-40],[40,-20],[0,25],[-40,-20],[-20,-40]],
+                            i: [[0,0],[0,-15],[15,0],[0,0],[-15,0],[0,15]], o: [[0,0],[15,0],[0,15],[0,0],[0,-15],[-15,0]] }}},
+                         { ty: 'fl', c: { a: 0, k: [0.91, 0.18, 0.27, 1] }, o: { a: 0, k: 100 } }],
+                        { s: { a: 1, k: [
+                            { t: 0, s: [90, 90, 100], e: [110, 110, 100], ...ease },
+                            { t: 15, s: [110, 110, 100], e: [90, 90, 100], ...ease },
+                            { t: 30, s: [90, 90, 100], e: [110, 110, 100], ...ease },
+                            { t: 45, s: [110, 110, 100], e: [90, 90, 100], ...ease },
+                            { t: 60, s: [90, 90, 100] }
+                        ]} })]) },
+
+                    // 1: Thumbs Up (bouncing)
+                    { name: 'Thumbs Up', data: wrap([makeLayer('thumb',
+                        [...ellipse(0, 8, 22, 28, [1, 0.84, 0.01, 1]),
+                         ...rect(0, -22, 12, 20, [1, 0.84, 0.01, 1], 4)],
+                        { p: { a: 1, k: [
+                            { t: 0, s: [C, C, 0], e: [C, C - 15, 0], ...ease },
+                            { t: 12, s: [C, C - 15, 0], e: [C, C, 0], ...ease },
+                            { t: 24, s: [C, C, 0], e: [C, C - 8, 0], ...ease },
+                            { t: 36, s: [C, C - 8, 0], e: [C, C, 0], ...ease },
+                            { t: 48, s: [C, C, 0] }
+                        ]} })]) },
+
+                    // 2: Spinning Star
+                    { name: 'Star', data: wrap([makeLayer('star',
+                        [{ ty: 'sr', p: { a: 0, k: [0, 0] }, or: { a: 0, k: 30 }, ir: { a: 0, k: 14 },
+                           pt: { a: 0, k: 5 }, os: { a: 0, k: 0 }, is: { a: 0, k: 0 }, r: { a: 0, k: 0 }, sy: 1 },
+                         { ty: 'fl', c: { a: 0, k: [1, 0.82, 0, 1] }, o: { a: 0, k: 100 } }],
+                        { r: { a: 1, k: [
+                            { t: 0, s: [0], e: [360], i: { x: [0.5], y: [1] }, o: { x: [0.5], y: [0] } },
+                            { t: 60, s: [360] }
+                        ]},
+                          s: { a: 1, k: [
+                            { t: 0, s: [100, 100, 100], e: [120, 120, 100], ...ease },
+                            { t: 30, s: [120, 120, 100], e: [100, 100, 100], ...ease },
+                            { t: 60, s: [100, 100, 100] }
+                        ]} })]) },
+
+                    // 3: Bouncing Ball
+                    { name: 'Bounce', data: wrap([makeLayer('ball',
+                        ellipse(0, 0, 20, 20, [0.4, 0.49, 0.92, 1]),
+                        { p: { a: 1, k: [
+                            { t: 0, s: [C, C - 30, 0], e: [C, C + 20, 0], i: { x: [0.6], y: [1] }, o: { x: [0.4], y: [0] } },
+                            { t: 15, s: [C, C + 20, 0], e: [C, C - 20, 0], ...ease },
+                            { t: 30, s: [C, C - 20, 0], e: [C, C + 20, 0], i: { x: [0.6], y: [1] }, o: { x: [0.4], y: [0] } },
+                            { t: 45, s: [C, C + 20, 0], e: [C, C - 10, 0], ...ease },
+                            { t: 55, s: [C, C - 10, 0], e: [C, C + 20, 0], i: { x: [0.6], y: [1] }, o: { x: [0.4], y: [0] } },
+                            { t: 60, s: [C, C + 20, 0] }
+                        ]},
+                          s: { a: 1, k: [
+                            { t: 14, s: [100, 100, 100], e: [130, 70, 100] },
+                            { t: 17, s: [130, 70, 100], e: [100, 100, 100], ...ease },
+                            { t: 22, s: [100, 100, 100] }
+                        ]} })]) },
+
+                    // 4: Fire (flickering)
+                    { name: 'Fire', data: wrap([
+                        makeLayer('flame-outer',
+                            [...ellipse(0, 5, 24, 32, [1, 0.42, 0, 1])],
+                            { s: { a: 1, k: [
+                                { t: 0, s: [100, 100, 100], e: [95, 110, 100], ...ease },
+                                { t: 10, s: [95, 110, 100], e: [105, 95, 100], ...ease },
+                                { t: 20, s: [105, 95, 100], e: [98, 108, 100], ...ease },
+                                { t: 30, s: [98, 108, 100], e: [103, 97, 100], ...ease },
+                                { t: 40, s: [103, 97, 100], e: [97, 105, 100], ...ease },
+                                { t: 50, s: [97, 105, 100], e: [100, 100, 100], ...ease },
+                                { t: 60, s: [100, 100, 100] }
+                            ]} }),
+                        makeLayer('flame-inner',
+                            [...ellipse(0, 10, 14, 20, [1, 0.85, 0, 1])],
+                            { s: { a: 1, k: [
+                                { t: 0, s: [100, 100, 100], e: [110, 90, 100], ...ease },
+                                { t: 15, s: [110, 90, 100], e: [90, 110, 100], ...ease },
+                                { t: 30, s: [90, 110, 100], e: [105, 95, 100], ...ease },
+                                { t: 45, s: [105, 95, 100], e: [100, 100, 100], ...ease },
+                                { t: 60, s: [100, 100, 100] }
+                            ]} })
+                    ]) },
+
+                    // 5: Waving Hand
+                    { name: 'Wave', data: wrap([makeLayer('hand',
+                        ellipse(0, 0, 25, 25, [1, 0.84, 0.01, 1]),
+                        { r: { a: 1, k: [
+                            { t: 0, s: [0], e: [25], ...ease },
+                            { t: 8, s: [25], e: [-20], ...ease },
+                            { t: 16, s: [-20], e: [20], ...ease },
+                            { t: 24, s: [20], e: [-15], ...ease },
+                            { t: 32, s: [-15], e: [10], ...ease },
+                            { t: 40, s: [10], e: [0], ...ease },
+                            { t: 48, s: [0] }
+                        ]} })]) },
+
+                    // 6: Check Mark (drawing in)
+                    { name: 'Check', data: wrap([makeLayer('bg',
+                        [...ellipse(0, 0, 40, 40, [0.18, 0.8, 0.33, 1])],
+                        { s: { a: 1, k: [
+                            { t: 0, s: [0, 0, 100], e: [110, 110, 100], ...ease },
+                            { t: 12, s: [110, 110, 100], e: [100, 100, 100], ...ease },
+                            { t: 18, s: [100, 100, 100] }
+                        ]} }),
+                        makeLayer('check',
+                        [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[-12, 0], [-4, 10], [14, -12]],
+                            i: [[0,0],[0,0],[0,0]], o: [[0,0],[0,0],[0,0]] }}},
+                         { ty: 'st', c: { a: 0, k: [1, 1, 1, 1] }, o: { a: 0, k: 100 }, w: { a: 0, k: 6 },
+                           lc: 2, lj: 2 },
+                         { ty: 'tm', s: { a: 0, k: 0 },
+                           e: { a: 1, k: [
+                            { t: 12, s: [0], e: [100], ...ease },
+                            { t: 28, s: [100] }
+                           ]}, o: { a: 0, k: 0 } }],
+                        {})
+                    ]) },
+
+                    // 7: Sparkle / Twinkle
+                    { name: 'Sparkle', data: wrap([
+                        makeLayer('star1',
+                            [{ ty: 'sr', p: { a: 0, k: [0, 0] }, or: { a: 0, k: 12 }, ir: { a: 0, k: 5 },
+                               pt: { a: 0, k: 4 }, os: { a: 0, k: 0 }, is: { a: 0, k: 0 }, r: { a: 0, k: 0 }, sy: 1 },
+                             { ty: 'fl', c: { a: 0, k: [1, 0.85, 0, 1] }, o: { a: 0, k: 100 } }],
+                            { p: { a: 0, k: [C - 15, C - 10, 0] },
+                              s: { a: 1, k: [
+                                { t: 0, s: [100, 100, 100], e: [0, 0, 100], ...ease },
+                                { t: 15, s: [0, 0, 100], e: [120, 120, 100], ...ease },
+                                { t: 30, s: [120, 120, 100], e: [100, 100, 100], ...ease },
+                                { t: 60, s: [100, 100, 100] }
+                            ]},
+                              r: { a: 1, k: [{ t: 0, s: [0], e: [90] }, { t: 60, s: [90] }] } }),
+                        makeLayer('star2',
+                            [{ ty: 'sr', p: { a: 0, k: [0, 0] }, or: { a: 0, k: 16 }, ir: { a: 0, k: 7 },
+                               pt: { a: 0, k: 4 }, os: { a: 0, k: 0 }, is: { a: 0, k: 0 }, r: { a: 0, k: 45 }, sy: 1 },
+                             { ty: 'fl', c: { a: 0, k: [0.4, 0.49, 0.92, 1] }, o: { a: 0, k: 100 } }],
+                            { p: { a: 0, k: [C + 15, C + 8, 0] },
+                              s: { a: 1, k: [
+                                { t: 10, s: [0, 0, 100], e: [110, 110, 100], ...ease },
+                                { t: 25, s: [110, 110, 100], e: [0, 0, 100], ...ease },
+                                { t: 40, s: [0, 0, 100], e: [100, 100, 100], ...ease },
+                                { t: 60, s: [100, 100, 100] }
+                            ]},
+                              r: { a: 1, k: [{ t: 0, s: [0], e: [-90] }, { t: 60, s: [-90] }] } }),
+                        makeLayer('star3',
+                            [{ ty: 'sr', p: { a: 0, k: [0, 0] }, or: { a: 0, k: 10 }, ir: { a: 0, k: 4 },
+                               pt: { a: 0, k: 4 }, os: { a: 0, k: 0 }, is: { a: 0, k: 0 }, r: { a: 0, k: 20 }, sy: 1 },
+                             { ty: 'fl', c: { a: 0, k: [0.91, 0.18, 0.55, 1] }, o: { a: 0, k: 100 } }],
+                            { p: { a: 0, k: [C + 5, C - 18, 0] },
+                              s: { a: 1, k: [
+                                { t: 20, s: [0, 0, 100], e: [100, 100, 100], ...ease },
+                                { t: 35, s: [100, 100, 100], e: [0, 0, 100], ...ease },
+                                { t: 50, s: [0, 0, 100], e: [90, 90, 100], ...ease },
+                                { t: 60, s: [90, 90, 100] }
+                            ]},
+                              r: { a: 1, k: [{ t: 0, s: [0], e: [120] }, { t: 60, s: [120] }] } })
+                    ]) },
+
+                    // 8: Rocket (flying up)
+                    { name: 'Rocket', data: wrap([makeLayer('rocket',
+                        [...rect(0, -5, 16, 30, [0.6, 0.65, 0.7, 1], 8),
+                         ...ellipse(0, -22, 6, 6, [0.91, 0.18, 0.27, 1]),
+                         ...ellipse(-4, 12, 5, 8, [1, 0.42, 0, 1]),
+                         ...ellipse(4, 12, 5, 8, [1, 0.42, 0, 1])],
+                        { p: { a: 1, k: [
+                            { t: 0, s: [C, C + 40, 0], e: [C, C, 0], ...ease },
+                            { t: 20, s: [C, C, 0], e: [C, C - 5, 0], ...ease },
+                            { t: 35, s: [C, C - 5, 0], e: [C, C + 3, 0], ...ease },
+                            { t: 45, s: [C, C + 3, 0], e: [C, C - 60, 0], i: { x: [0.2], y: [1] }, o: { x: [0.8], y: [0] } },
+                            { t: 60, s: [C, C - 60, 0] }
+                        ]},
+                          r: { a: 1, k: [
+                            { t: 20, s: [0], e: [3] }, { t: 25, s: [3], e: [-3] },
+                            { t: 30, s: [-3], e: [2] }, { t: 35, s: [2], e: [0] },
+                            { t: 40, s: [0] }
+                        ]} })]) },
+
+                    // 9: Sad Face
+                    { name: 'Sad', data: wrap([
+                        makeLayer('face', ellipse(0, 0, 35, 35, [1, 0.84, 0.01, 1]), {}),
+                        makeLayer('eyeL', ellipse(-12, -8, 4, 5, [0.2, 0.15, 0.1, 1]), {}),
+                        makeLayer('eyeR', ellipse(12, -8, 4, 5, [0.2, 0.15, 0.1, 1]), {}),
+                        makeLayer('mouth',
+                            [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[-14, 14], [0, 6], [14, 14]],
+                                i: [[0,0],[0,5],[0,0]], o: [[0,5],[0,0],[0,0]] }}},
+                             { ty: 'st', c: { a: 0, k: [0.2, 0.15, 0.1, 1] }, o: { a: 0, k: 100 }, w: { a: 0, k: 3 }, lc: 2, lj: 2 }],
+                            { p: { a: 1, k: [
+                                { t: 0, s: [C, C, 0], e: [C, C + 2, 0], ...ease },
+                                { t: 30, s: [C, C + 2, 0], e: [C, C, 0], ...ease },
+                                { t: 60, s: [C, C, 0] }
+                            ]} }),
+                        makeLayer('tear',
+                            ellipse(0, 0, 4, 5, [0.3, 0.7, 1, 1]),
+                            { p: { a: 1, k: [
+                                { t: 10, s: [C - 12, C - 2, 0], e: [C - 12, C + 25, 0], i: { x: [0.6], y: [1] }, o: { x: [0.4], y: [0] } },
+                                { t: 35, s: [C - 12, C + 25, 0] },
+                                { t: 36, s: [C - 12, C - 2, 0], e: [C - 12, C + 25, 0], i: { x: [0.6], y: [1] }, o: { x: [0.4], y: [0] } },
+                                { t: 60, s: [C - 12, C + 25, 0] }
+                            ]},
+                              o: { a: 1, k: [
+                                { t: 10, s: [100], e: [100] }, { t: 30, s: [100], e: [0] }, { t: 35, s: [0] },
+                                { t: 36, s: [100], e: [100] }, { t: 55, s: [100], e: [0] }, { t: 60, s: [0] }
+                            ]} })
+                    ]) },
+
+                    // 10: LOL (laughing)
+                    { name: 'LOL', data: wrap([
+                        makeLayer('face', ellipse(0, 0, 35, 35, [1, 0.84, 0.01, 1]),
+                            { s: { a: 1, k: [
+                                { t: 0, s: [100, 100, 100], e: [103, 97, 100], ...ease },
+                                { t: 8, s: [103, 97, 100], e: [97, 103, 100], ...ease },
+                                { t: 16, s: [97, 103, 100], e: [102, 98, 100], ...ease },
+                                { t: 24, s: [102, 98, 100], e: [100, 100, 100], ...ease },
+                                { t: 32, s: [100, 100, 100] }
+                            ]} }),
+                        makeLayer('eyeL',
+                            [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[-6, 0], [0, -5], [6, 0]],
+                                i: [[0,0],[0,0],[0,0]], o: [[0,0],[0,0],[0,0]] }}},
+                             { ty: 'st', c: { a: 0, k: [0.2, 0.15, 0.1, 1] }, o: { a: 0, k: 100 }, w: { a: 0, k: 3 }, lc: 2, lj: 2 }],
+                            { p: { a: 0, k: [C - 12, C - 6, 0] } }),
+                        makeLayer('eyeR',
+                            [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[-6, 0], [0, -5], [6, 0]],
+                                i: [[0,0],[0,0],[0,0]], o: [[0,0],[0,0],[0,0]] }}},
+                             { ty: 'st', c: { a: 0, k: [0.2, 0.15, 0.1, 1] }, o: { a: 0, k: 100 }, w: { a: 0, k: 3 }, lc: 2, lj: 2 }],
+                            { p: { a: 0, k: [C + 12, C - 6, 0] } }),
+                        makeLayer('mouth',
+                            [{ ty: 'sh', ks: { a: 0, k: { c: false, v: [[-14, 8], [0, 20], [14, 8]],
+                                i: [[0,0],[0,0],[0,0]], o: [[0,8],[0,0],[0,8]] }}},
+                             { ty: 'st', c: { a: 0, k: [0.2, 0.15, 0.1, 1] }, o: { a: 0, k: 100 }, w: { a: 0, k: 3 }, lc: 2, lj: 2 }],
+                            {})
+                    ]) },
+
+                    // 11: Party Popper (burst)
+                    { name: 'Party', data: wrap([
+                        makeLayer('cone',
+                            [...rect(5, 10, 18, 28, [1, 0.84, 0, 1], 3)],
+                            { r: { a: 0, k: -30 },
+                              s: { a: 1, k: [
+                                { t: 0, s: [0, 0, 100], e: [110, 110, 100], ...ease },
+                                { t: 10, s: [110, 110, 100], e: [100, 100, 100], ...ease },
+                                { t: 15, s: [100, 100, 100] }
+                            ]} }),
+                        makeLayer('dot1', ellipse(0, 0, 6, 6, [0.91, 0.18, 0.27, 1]),
+                            { p: { a: 1, k: [
+                                { t: 5, s: [C, C, 0], e: [C - 30, C - 35, 0], ...ease },
+                                { t: 25, s: [C - 30, C - 35, 0] }
+                            ]},
+                              o: { a: 1, k: [{ t: 5, s: [100] }, { t: 20, s: [100], e: [0] }, { t: 30, s: [0] }] } }),
+                        makeLayer('dot2', ellipse(0, 0, 5, 5, [0.4, 0.49, 0.92, 1]),
+                            { p: { a: 1, k: [
+                                { t: 5, s: [C, C, 0], e: [C + 25, C - 30, 0], ...ease },
+                                { t: 25, s: [C + 25, C - 30, 0] }
+                            ]},
+                              o: { a: 1, k: [{ t: 5, s: [100] }, { t: 20, s: [100], e: [0] }, { t: 30, s: [0] }] } }),
+                        makeLayer('dot3', ellipse(0, 0, 7, 7, [0.18, 0.8, 0.33, 1]),
+                            { p: { a: 1, k: [
+                                { t: 5, s: [C, C, 0], e: [C - 10, C - 40, 0], ...ease },
+                                { t: 25, s: [C - 10, C - 40, 0] }
+                            ]},
+                              o: { a: 1, k: [{ t: 5, s: [100] }, { t: 20, s: [100], e: [0] }, { t: 30, s: [0] }] } }),
+                        makeLayer('dot4', ellipse(0, 0, 4, 4, [1, 0.42, 0, 1]),
+                            { p: { a: 1, k: [
+                                { t: 5, s: [C, C, 0], e: [C + 35, C - 15, 0], ...ease },
+                                { t: 25, s: [C + 35, C - 15, 0] }
+                            ]},
+                              o: { a: 1, k: [{ t: 5, s: [100] }, { t: 20, s: [100], e: [0] }, { t: 30, s: [0] }] } })
+                    ]) }
+                ];
+            }
+
             loadEmojiTab(tab) {
                 const grid = document.getElementById('emojiGrid');
                 grid.innerHTML = '';
+
+                if (tab === 'stickers') {
+                    this.loadStickerTab(grid);
+                    return;
+                }
 
                 const sets = {
                     smileys: [
@@ -2035,27 +2366,44 @@
                         '➡️','⬅️','⬆️','⬇️','↗️','↘️','↙️','↖️','↕️','↔️',
                         '🔄','🔃','➕','➖','➗','✖️','♾️','💲','💱','©️',
                         '®️','™️','🔒','🔓','🔑','🗝️','🔨','🛠️','⚙️','🧲'
-                    ],
-                    stickers: [
-                        '🎉','🥳','🎊','🪅',
-                        '🌈','🌸','🌺','🌻',
-                        '🦄','🐱','🐶','🐼',
-                        '🚀','✈️','🏖️','🌍',
-                        '☕','🍕','🍔','🎂',
-                        '💡','📚','🎓','💻',
-                        '🏠','🌙','☀️','⛈️',
-                        '🎸','🎹','🎨','📷'
                     ]
                 };
 
                 const emojis = sets[tab] || sets.smileys;
-                const isSticker = tab === 'stickers';
 
                 for (const emoji of emojis) {
                     const btn = document.createElement('button');
                     btn.dataset.emoji = emoji;
                     btn.textContent = emoji;
-                    if (isSticker) btn.classList.add('sticker-btn');
+                    grid.appendChild(btn);
+                }
+            }
+
+            loadStickerTab(grid) {
+                const stickers = this.getLottieStickers();
+                for (let i = 0; i < stickers.length; i++) {
+                    const btn = document.createElement('button');
+                    btn.classList.add('sticker-btn');
+                    btn.dataset.stickerId = i;
+                    btn.title = stickers[i].name;
+
+                    // Render animated Lottie preview in the button
+                    const container = document.createElement('div');
+                    container.style.width = '48px';
+                    container.style.height = '48px';
+                    container.style.pointerEvents = 'none';
+                    btn.appendChild(container);
+
+                    if (typeof lottie !== 'undefined') {
+                        lottie.loadAnimation({
+                            container: container,
+                            renderer: 'svg',
+                            loop: true,
+                            autoplay: true,
+                            animationData: stickers[i].data
+                        });
+                    }
+
                     grid.appendChild(btn);
                 }
             }
@@ -2307,8 +2655,12 @@
                     const raw = msg.dataset.raw;
                     const voice = msg.querySelector('.voice-message');
                     const dur = msg.querySelector('.voice-duration');
+                    const sticker = msg.querySelector('.sticker-container');
+                    let msgType = 'text';
+                    if (sticker) msgType = 'sticker';
+                    else if (voice) msgType = 'voice';
                     entries.push({
-                        type: voice ? 'voice' : 'text',
+                        type: msgType,
                         sender: sender ? sender.textContent : '???',
                         time: time ? time.textContent : '',
                         text: raw || '',
@@ -2347,6 +2699,7 @@
                     if (e.type === 'system') { lines.push('_' + e.text + '_', ''); continue; }
                     const prefix = '**' + e.sender + '** (' + e.time + ')';
                     if (e.type === 'voice') { lines.push(prefix + ': [' + e.voiceLabel + ']'); }
+                    else if (e.type === 'sticker') { lines.push(prefix + ': [Sticker]'); }
                     else { lines.push(prefix + ':', e.text); }
                     lines.push('');
                 }
@@ -2359,6 +2712,7 @@
                     if (e.type === 'system') { lines.push('--- ' + e.text + ' ---', ''); continue; }
                     const prefix = e.sender + ' (' + e.time + ')';
                     if (e.type === 'voice') { lines.push(prefix + ': [' + e.voiceLabel + ']'); }
+                    else if (e.type === 'sticker') { lines.push(prefix + ': [Sticker]'); }
                     else { lines.push(prefix + ':', e.text); }
                     lines.push('');
                 }
@@ -2388,6 +2742,8 @@
                     html += '<div class="sender">' + this.escapeExportHtml(e.sender) + '</div>';
                     if (e.type === 'voice') {
                         html += '<em>' + this.escapeExportHtml(e.voiceLabel) + '</em>';
+                    } else if (e.type === 'sticker') {
+                        html += '<em>[Animated Sticker]</em>';
                     } else {
                         html += MessageRenderer.render(e.text);
                     }
@@ -2430,6 +2786,8 @@
                     html += '<div class="sender">' + this.escapeExportHtml(e.sender) + '</div>';
                     if (e.type === 'voice') {
                         html += '<em>' + this.escapeExportHtml(e.voiceLabel) + '</em>';
+                    } else if (e.type === 'sticker') {
+                        html += '<em>[Animated Sticker]</em>';
                     } else {
                         html += this.escapeExportHtml(e.text);
                     }
@@ -2652,6 +3010,8 @@
                             this.handleCallEnd();
                         } else if (data.type === 'call-reject') {
                             this.handleCallReject();
+                        } else if (data.type === 'sticker') {
+                            this.displaySticker(data.stickerId, false, data.sender);
                         } else if (data.type === 'renegotiate-offer') {
                             this.handleRenegotiateOffer(data.sdp);
                         } else if (data.type === 'renegotiate-answer') {
@@ -3028,6 +3388,59 @@
                 } catch (e) {
                     console.error('Failed to handle renegotiate answer:', e);
                 }
+            }
+
+            // --- Stickers ---
+
+            sendSticker(stickerId) {
+                if (!this.dataChannel || this.dataChannel.readyState !== 'open') return;
+                const stickers = this.getLottieStickers();
+                if (stickerId < 0 || stickerId >= stickers.length) return;
+
+                this.dataChannel.send(JSON.stringify({
+                    type: 'sticker',
+                    stickerId: stickerId,
+                    sender: this.userName
+                }));
+
+                this.displaySticker(stickerId, true, this.userName);
+            }
+
+            displaySticker(stickerId, isSent, sender) {
+                const stickers = this.getLottieStickers();
+                if (stickerId < 0 || stickerId >= stickers.length) return;
+
+                const messages = document.getElementById('messages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message ' + (isSent ? 'sent' : 'received');
+
+                const senderDiv = document.createElement('div');
+                senderDiv.className = 'sender';
+                senderDiv.textContent = sender || (isSent ? 'You' : 'Peer');
+
+                const stickerDiv = document.createElement('div');
+                stickerDiv.className = 'sticker-container';
+
+                if (typeof lottie !== 'undefined') {
+                    lottie.loadAnimation({
+                        container: stickerDiv,
+                        renderer: 'svg',
+                        loop: true,
+                        autoplay: true,
+                        animationData: stickers[stickerId].data
+                    });
+                }
+
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'timestamp';
+                timeDiv.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                messageDiv.appendChild(senderDiv);
+                messageDiv.appendChild(stickerDiv);
+                messageDiv.appendChild(timeDiv);
+
+                messages.appendChild(messageDiv);
+                messages.scrollTop = messages.scrollHeight;
             }
 
             async renegotiateAfterCleanup() {
