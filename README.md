@@ -30,7 +30,8 @@ Both people must have the page open at the same time. The codes are long — alw
 | **Voice messages** | Record and send audio clips over the data channel |
 | **Speech-to-text** | Dictate into the text box via Web Speech API |
 | **Audio calls** | Live voice calls with ring tones, mute, and call timer |
-| **Emoji picker** | Tabbed picker with ~300 emoji and stickers |
+| **Animated stickers** | 12 Lottie vector stickers (heart, rocket, party, etc.) |
+| **Emoji picker** | Tabbed picker with ~300 emoji |
 | **Chat export** | Export as Markdown, Plain Text, HTML, or PDF |
 
 ## Security
@@ -44,7 +45,8 @@ Both people must have the page open at the same time. The codes are long — alw
 ## Technical details
 
 - **Single HTML file** — no build step, no dependencies to install, no server to run
-- CDN libraries: [marked.js](https://github.com/markedjs/marked), [KaTeX](https://katex.org/), [DOMPurify](https://github.com/cure53/DOMPurify)
+- CDN libraries: [marked.js](https://github.com/markedjs/marked), [KaTeX](https://katex.org/), [DOMPurify](https://github.com/cure53/DOMPurify), [lottie-web](https://github.com/airbnb/lottie-web)
+- Animated stickers are hand-crafted Lottie JSON embedded inline — only the sticker ID is sent over the wire
 - Ring tones generated via Web Audio API (no audio files)
 - Voice messages chunked at 48KB for data channel compatibility
 - SDP glare handling via perfect negotiation pattern (host=impolite, guest=polite)
