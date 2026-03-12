@@ -3,55 +3,57 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P Chat</title>
+    <title>P2P Secured Chat</title>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            height: 100vh;
+            min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            padding: 1rem;
         }
-        
+
         .container {
             background: rgba(255, 255, 255, 0.95);
             backdrop-filter: blur(10px);
             border-radius: 20px;
             padding: 2rem;
             width: 90%;
-            max-width: 500px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 520px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
         }
-        
+
         .setup-screen {
             text-align: center;
         }
-        
+
         .chat-screen {
             display: none;
-            height: 400px;
+            height: 70vh;
+            max-height: 500px;
             flex-direction: column;
         }
-        
+
         h1 {
             color: #333;
             margin-bottom: 1.5rem;
             font-size: 1.8rem;
         }
-        
+
         .connection-options {
             display: flex;
             gap: 1rem;
             margin-bottom: 2rem;
         }
-        
+
         .option-btn {
             flex: 1;
             padding: 1rem;
@@ -62,39 +64,49 @@
             font-weight: bold;
             cursor: pointer;
             transition: all 0.3s ease;
+            user-select: none;
         }
-        
+
         .option-btn:hover, .option-btn.active {
             background: #667eea;
             color: white;
             transform: translateY(-2px);
         }
-        
+
         .input-group {
             margin-bottom: 1rem;
+            text-align: left;
         }
-        
+
         label {
             display: block;
             margin-bottom: 0.5rem;
             color: #555;
             font-weight: 500;
         }
-        
-        input {
+
+        input, textarea {
             width: 100%;
             padding: 0.8rem;
             border: 2px solid #e1e5e9;
             border-radius: 8px;
             font-size: 1rem;
+            font-family: inherit;
             transition: border-color 0.3s ease;
         }
-        
-        input:focus {
+
+        input:focus, textarea:focus {
             outline: none;
             border-color: #667eea;
         }
-        
+
+        textarea {
+            resize: vertical;
+            min-height: 60px;
+            font-family: monospace;
+            font-size: 0.85rem;
+        }
+
         .btn {
             width: 100%;
             padding: 0.8rem;
@@ -105,19 +117,30 @@
             font-size: 1rem;
             font-weight: bold;
             cursor: pointer;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, opacity 0.2s ease;
         }
-        
+
         .btn:hover {
             transform: translateY(-1px);
         }
-        
+
         .btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
             transform: none;
         }
-        
+
+        .btn-secondary {
+            background: #6c757d;
+            margin-top: 0.5rem;
+        }
+
+        .btn-small {
+            width: auto;
+            padding: 0.4rem 0.8rem;
+            font-size: 0.85rem;
+        }
+
         .status {
             margin-top: 1rem;
             padding: 0.8rem;
@@ -125,22 +148,62 @@
             text-align: center;
             font-weight: 500;
         }
-        
+
         .status.connecting {
             background: #fff3cd;
             color: #856404;
         }
-        
+
         .status.connected {
             background: #d4edda;
             color: #155724;
         }
-        
+
         .status.error {
             background: #f8d7da;
             color: #721c24;
         }
-        
+
+        .step-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            padding: 0.6rem 1rem;
+            background: #e8eaf6;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            color: #333;
+        }
+
+        .step-indicator .step-num {
+            background: #667eea;
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.8rem;
+            flex-shrink: 0;
+        }
+
+        .connection-id-box {
+            background: #f1f3f5;
+            border: 1px solid #dee2e6;
+            padding: 0.6rem;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            margin: 0.5rem 0;
+            word-break: break-all;
+            max-height: 80px;
+            overflow-y: auto;
+            user-select: all;
+        }
+
         .messages {
             flex: 1;
             border: 2px solid #e1e5e9;
@@ -150,7 +213,7 @@
             overflow-y: auto;
             background: #f8f9fa;
         }
-        
+
         .message {
             margin-bottom: 0.8rem;
             padding: 0.6rem 1rem;
@@ -158,29 +221,40 @@
             max-width: 80%;
             word-wrap: break-word;
         }
-        
+
         .message.sent {
             background: #667eea;
             color: white;
             margin-left: auto;
-            text-align: right;
         }
-        
+
         .message.received {
             background: white;
             color: #333;
             border: 1px solid #e1e5e9;
         }
-        
+
+        .message .sender {
+            font-size: 0.75rem;
+            opacity: 0.7;
+            margin-bottom: 0.2rem;
+        }
+
+        .message .timestamp {
+            font-size: 0.65rem;
+            opacity: 0.5;
+            margin-top: 0.2rem;
+        }
+
         .message-input {
             display: flex;
             gap: 0.5rem;
         }
-        
+
         .message-input input {
             flex: 1;
         }
-        
+
         .message-input button {
             padding: 0.8rem 1.5rem;
             background: #667eea;
@@ -189,63 +263,126 @@
             border-radius: 8px;
             cursor: pointer;
             font-weight: bold;
+            transition: background 0.2s;
         }
-        
-        .connection-id {
-            background: #e9ecef;
-            padding: 0.5rem;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 0.9rem;
-            margin: 0.5rem 0;
-            word-break: break-all;
+
+        .message-input button:hover {
+            background: #5a6fd6;
         }
-        
-        .copy-btn {
+
+        .system-message {
+            text-align: center;
             font-size: 0.8rem;
-            padding: 0.3rem 0.6rem;
-            margin-left: 0.5rem;
+            color: #888;
+            margin: 0.5rem 0;
+            font-style: italic;
         }
+
+        .chat-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.8rem;
+        }
+
+        .chat-header h1 {
+            margin-bottom: 0;
+            font-size: 1.4rem;
+        }
+
+        .connection-status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.3rem;
+        }
+
+        .connection-status-dot.open { background: #28a745; }
+        .connection-status-dot.closed { background: #dc3545; }
+        .connection-status-dot.connecting { background: #ffc107; }
+
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="setup-screen" id="setupScreen">
-            <h1>🚀 P2P Chat</h1>
-            
+            <h1>P2P Secured Chat</h1>
+
             <div class="connection-options">
                 <div class="option-btn active" id="hostBtn">Host Chat</div>
                 <div class="option-btn" id="joinBtn">Join Chat</div>
             </div>
-            
+
+            <!-- HOST FLOW -->
             <div id="hostSection">
-                <div class="input-group">
-                    <label>Your Name:</label>
-                    <input type="text" id="hostName" placeholder="Enter your name">
+                <div id="hostStep1">
+                    <div class="input-group">
+                        <label>Your Name:</label>
+                        <input type="text" id="hostName" placeholder="Enter your name" maxlength="30">
+                    </div>
+                    <button class="btn" id="createRoomBtn">Create Chat Room</button>
                 </div>
-                <button class="btn" id="createRoomBtn">Create Chat Room</button>
+
+                <div id="hostStep2" class="hidden">
+                    <div class="step-indicator">
+                        <span class="step-num">1</span>
+                        Copy this and send it to your friend:
+                    </div>
+                    <div class="connection-id-box" id="hostOffer"></div>
+                    <button class="btn btn-small" id="copyOfferBtn">Copy to Clipboard</button>
+
+                    <div class="step-indicator" style="margin-top: 1rem;">
+                        <span class="step-num">2</span>
+                        Paste their response here:
+                    </div>
+                    <div class="input-group">
+                        <textarea id="hostAnswerInput" placeholder="Paste your friend's answer code here..." rows="3"></textarea>
+                    </div>
+                    <button class="btn" id="hostConnectBtn">Connect</button>
+                </div>
             </div>
-            
-            <div id="joinSection" style="display: none;">
-                <div class="input-group">
-                    <label>Your Name:</label>
-                    <input type="text" id="guestName" placeholder="Enter your name">
+
+            <!-- JOIN FLOW -->
+            <div id="joinSection" class="hidden">
+                <div id="joinStep1">
+                    <div class="input-group">
+                        <label>Your Name:</label>
+                        <input type="text" id="guestName" placeholder="Enter your name" maxlength="30">
+                    </div>
+                    <div class="input-group">
+                        <label>Paste the host's Connection ID:</label>
+                        <textarea id="connectionId" placeholder="Paste the connection code from the host..." rows="3"></textarea>
+                    </div>
+                    <button class="btn" id="joinRoomBtn">Join Chat</button>
                 </div>
-                <div class="input-group">
-                    <label>Connection ID:</label>
-                    <input type="text" id="connectionId" placeholder="Paste connection ID here">
+
+                <div id="joinStep2" class="hidden">
+                    <div class="step-indicator">
+                        <span class="step-num">1</span>
+                        Copy this and send it back to the host:
+                    </div>
+                    <div class="connection-id-box" id="joinerAnswer"></div>
+                    <button class="btn btn-small" id="copyAnswerBtn">Copy to Clipboard</button>
+                    <div class="status connecting" style="margin-top: 1rem;">Waiting for host to connect...</div>
                 </div>
-                <button class="btn" id="joinRoomBtn">Join Chat</button>
             </div>
-            
+
             <div class="status" id="status" style="display: none;"></div>
         </div>
-        
+
         <div class="chat-screen" id="chatScreen">
-            <h1 id="chatTitle">Chat</h1>
+            <div class="chat-header">
+                <h1 id="chatTitle">Chat</h1>
+                <div id="connectionIndicator">
+                    <span class="connection-status-dot open"></span>
+                    <span style="font-size: 0.85rem; color: #555;">Connected</span>
+                </div>
+            </div>
             <div class="messages" id="messages"></div>
             <div class="message-input">
-                <input type="text" id="messageInput" placeholder="Type your message...">
+                <input type="text" id="messageInput" placeholder="Type your message..." maxlength="2000">
                 <button id="sendBtn">Send</button>
             </div>
         </div>
@@ -259,225 +396,342 @@
                 this.isHost = true;
                 this.userName = '';
                 this.peerName = '';
+                this.iceGatheringComplete = false;
                 this.setupEventListeners();
             }
-            
+
             setupEventListeners() {
                 document.getElementById('hostBtn').addEventListener('click', () => this.selectMode(true));
                 document.getElementById('joinBtn').addEventListener('click', () => this.selectMode(false));
                 document.getElementById('createRoomBtn').addEventListener('click', () => this.createRoom());
                 document.getElementById('joinRoomBtn').addEventListener('click', () => this.joinRoom());
+                document.getElementById('hostConnectBtn').addEventListener('click', () => this.completeConnection());
                 document.getElementById('sendBtn').addEventListener('click', () => this.sendMessage());
                 document.getElementById('messageInput').addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') this.sendMessage();
                 });
+
+                document.getElementById('copyOfferBtn').addEventListener('click', () => {
+                    const text = document.getElementById('hostOffer').textContent;
+                    navigator.clipboard.writeText(text).then(() => {
+                        document.getElementById('copyOfferBtn').textContent = 'Copied!';
+                        setTimeout(() => { document.getElementById('copyOfferBtn').textContent = 'Copy to Clipboard'; }, 2000);
+                    });
+                });
+
+                document.getElementById('copyAnswerBtn').addEventListener('click', () => {
+                    const text = document.getElementById('joinerAnswer').textContent;
+                    navigator.clipboard.writeText(text).then(() => {
+                        document.getElementById('copyAnswerBtn').textContent = 'Copied!';
+                        setTimeout(() => { document.getElementById('copyAnswerBtn').textContent = 'Copy to Clipboard'; }, 2000);
+                    });
+                });
             }
-            
+
             selectMode(isHost) {
                 this.isHost = isHost;
                 document.getElementById('hostBtn').classList.toggle('active', isHost);
                 document.getElementById('joinBtn').classList.toggle('active', !isHost);
-                document.getElementById('hostSection').style.display = isHost ? 'block' : 'none';
-                document.getElementById('joinSection').style.display = isHost ? 'none' : 'block';
+                document.getElementById('hostSection').classList.toggle('hidden', !isHost);
+                document.getElementById('joinSection').classList.toggle('hidden', isHost);
             }
-            
+
+            createPeerConnection() {
+                this.pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+
+                this.pc.onconnectionstatechange = () => {
+                    const state = this.pc.connectionState;
+                    if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+                        this.onDisconnected();
+                    }
+                };
+
+                this.pc.oniceconnectionstatechange = () => {
+                    if (this.pc.iceConnectionState === 'failed') {
+                        this.showStatus('Connection failed. Please try again.', 'error');
+                    }
+                };
+            }
+
+            waitForIceGathering() {
+                return new Promise((resolve) => {
+                    if (this.pc.iceGatheringState === 'complete') {
+                        resolve();
+                        return;
+                    }
+
+                    const checkState = () => {
+                        if (this.pc.iceGatheringState === 'complete') {
+                            this.pc.removeEventListener('icegatheringstatechange', checkState);
+                            resolve();
+                        }
+                    };
+                    this.pc.addEventListener('icegatheringstatechange', checkState);
+
+                    // Safety timeout — proceed after 5s even if gathering isn't complete
+                    setTimeout(() => {
+                        this.pc.removeEventListener('icegatheringstatechange', checkState);
+                        resolve();
+                    }, 5000);
+                });
+            }
+
             async createRoom() {
                 this.userName = document.getElementById('hostName').value.trim();
                 if (!this.userName) {
                     this.showStatus('Please enter your name', 'error');
                     return;
                 }
-                
-                this.showStatus('Creating room...', 'connecting');
-                
+
+                this.showStatus('Creating room (gathering network info)...', 'connecting');
+                document.getElementById('createRoomBtn').disabled = true;
+
                 try {
-                    this.pc = new RTCPeerConnection({
-                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-                    });
-                    
+                    this.createPeerConnection();
+
                     this.dataChannel = this.pc.createDataChannel('chat');
                     this.setupDataChannel();
-                    
+
                     const offer = await this.pc.createOffer();
                     await this.pc.setLocalDescription(offer);
-                    
+
+                    // Wait for ICE gathering to complete before showing the offer
+                    await this.waitForIceGathering();
+
                     const connectionData = JSON.stringify({
-                        offer: offer,
+                        type: 'offer',
+                        sdp: this.pc.localDescription,
                         userName: this.userName
                     });
-                    
-                    this.showConnectionId(btoa(connectionData));
-                    
-                    this.pc.onicecandidate = (event) => {
-                        if (event.candidate === null) {
-                            const finalData = JSON.stringify({
-                                offer: this.pc.localDescription,
-                                userName: this.userName
-                            });
-                            this.showConnectionId(btoa(finalData));
-                        }
-                    };
-                    
+
+                    const encoded = btoa(connectionData);
+                    document.getElementById('hostOffer').textContent = encoded;
+                    document.getElementById('hostStep1').classList.add('hidden');
+                    document.getElementById('hostStep2').classList.remove('hidden');
+                    document.getElementById('status').style.display = 'none';
+
                 } catch (error) {
                     this.showStatus('Error creating room: ' + error.message, 'error');
+                    document.getElementById('createRoomBtn').disabled = false;
                 }
             }
-            
+
             async joinRoom() {
                 this.userName = document.getElementById('guestName').value.trim();
                 const connectionId = document.getElementById('connectionId').value.trim();
-                
-                if (!this.userName || !connectionId) {
-                    this.showStatus('Please enter your name and connection ID', 'error');
+
+                if (!this.userName) {
+                    this.showStatus('Please enter your name', 'error');
                     return;
                 }
-                
+                if (!connectionId) {
+                    this.showStatus('Please paste the connection ID from the host', 'error');
+                    return;
+                }
+
                 this.showStatus('Joining room...', 'connecting');
-                
+                document.getElementById('joinRoomBtn').disabled = true;
+
                 try {
-                    const connectionData = JSON.parse(atob(connectionId));
+                    let connectionData;
+                    try {
+                        connectionData = JSON.parse(atob(connectionId));
+                    } catch (e) {
+                        throw new Error('Invalid connection code. Make sure you copied the full text.');
+                    }
+
+                    if (!connectionData.sdp || connectionData.type !== 'offer') {
+                        throw new Error('This does not appear to be a valid host connection code.');
+                    }
+
                     this.peerName = connectionData.userName;
-                    
-                    this.pc = new RTCPeerConnection({
-                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-                    });
-                    
+
+                    this.createPeerConnection();
+
                     this.pc.ondatachannel = (event) => {
                         this.dataChannel = event.channel;
                         this.setupDataChannel();
                     };
-                    
-                    await this.pc.setRemoteDescription(connectionData.offer);
+
+                    await this.pc.setRemoteDescription(connectionData.sdp);
                     const answer = await this.pc.createAnswer();
                     await this.pc.setLocalDescription(answer);
-                    
+
+                    // Wait for ICE gathering to complete before showing the answer
+                    await this.waitForIceGathering();
+
                     const answerData = JSON.stringify({
-                        answer: answer,
+                        type: 'answer',
+                        sdp: this.pc.localDescription,
                         userName: this.userName
                     });
-                    
-                    this.showAnswerId(btoa(answerData));
-                    
+
+                    const encoded = btoa(answerData);
+                    document.getElementById('joinerAnswer').textContent = encoded;
+                    document.getElementById('joinStep1').classList.add('hidden');
+                    document.getElementById('joinStep2').classList.remove('hidden');
+                    document.getElementById('status').style.display = 'none';
+
                 } catch (error) {
-                    this.showStatus('Error joining room: ' + error.message, 'error');
+                    this.showStatus('Error: ' + error.message, 'error');
+                    document.getElementById('joinRoomBtn').disabled = false;
                 }
             }
-            
+
+            async completeConnection() {
+                const answerCode = document.getElementById('hostAnswerInput').value.trim();
+                if (!answerCode) {
+                    this.showStatus('Please paste the answer code from your friend', 'error');
+                    return;
+                }
+
+                document.getElementById('hostConnectBtn').disabled = true;
+
+                try {
+                    let answerData;
+                    try {
+                        answerData = JSON.parse(atob(answerCode));
+                    } catch (e) {
+                        throw new Error('Invalid answer code. Make sure you copied the full text.');
+                    }
+
+                    if (!answerData.sdp || answerData.type !== 'answer') {
+                        throw new Error('This does not appear to be a valid answer code.');
+                    }
+
+                    this.peerName = answerData.userName;
+                    await this.pc.setRemoteDescription(answerData.sdp);
+
+                    this.showStatus('Connecting...', 'connecting');
+
+                } catch (error) {
+                    this.showStatus('Error: ' + error.message, 'error');
+                    document.getElementById('hostConnectBtn').disabled = false;
+                }
+            }
+
             setupDataChannel() {
                 this.dataChannel.onopen = () => {
-                    this.showStatus('Connected! You can now chat.', 'connected');
-                    setTimeout(() => this.showChatScreen(), 1000);
-                };
-                
-                this.dataChannel.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'message') {
-                        this.displayMessage(data.message, false, data.sender);
-                    } else if (data.type === 'name') {
-                        this.peerName = data.name;
-                        this.updateChatTitle();
-                    }
-                };
-                
-                this.dataChannel.onclose = () => {
-                    this.showStatus('Connection closed', 'error');
-                };
-            }
-            
-            showConnectionId(id) {
-                const status = document.getElementById('status');
-                status.innerHTML = `
-                    <div>Share this Connection ID with your friend:</div>
-                    <div class="connection-id">${id}<button class="btn copy-btn" onclick="navigator.clipboard.writeText('${id}')">Copy</button></div>
-                    <div>Waiting for connection...</div>
-                `;
-                status.className = 'status connecting';
-                status.style.display = 'block';
-            }
-            
-            showAnswerId(id) {
-                const status = document.getElementById('status');
-                status.innerHTML = `
-                    <div>Send this Answer ID back to your friend:</div>
-                    <div class="connection-id">${id}<button class="btn copy-btn" onclick="navigator.clipboard.writeText('${id}')">Copy</button></div>
-                    <div>Establishing connection...</div>
-                `;
-                status.className = 'status connecting';
-                status.style.display = 'block';
-                
-                // For the host to complete the connection
-                if (!this.isHost) {
-                    setTimeout(() => {
-                        status.innerHTML += '<div style="margin-top: 1rem;"><input type="text" placeholder="Paste the final connection code here..." id="finalCode"><button class="btn" onclick="chat.completConnection()">Connect</button></div>';
-                    }, 2000);
-                }
-            }
-            
-            async completConnection() {
-                const finalCode = document.getElementById('finalCode').value.trim();
-                if (!finalCode) return;
-                
-                try {
-                    const answerData = JSON.parse(atob(finalCode));
-                    this.peerName = answerData.userName;
-                    await this.pc.setRemoteDescription(answerData.answer);
-                } catch (error) {
-                    this.showStatus('Error completing connection: ' + error.message, 'error');
-                }
-            }
-            
-            showStatus(message, type) {
-                const status = document.getElementById('status');
-                status.textContent = message;
-                status.className = `status ${type}`;
-                status.style.display = 'block';
-            }
-            
-            showChatScreen() {
-                document.getElementById('setupScreen').style.display = 'none';
-                document.getElementById('chatScreen').style.display = 'flex';
-                this.updateChatTitle();
-                
-                // Send name to peer
-                if (this.dataChannel && this.dataChannel.readyState === 'open') {
+                    this.showChatScreen();
+                    // Send name to peer
                     this.dataChannel.send(JSON.stringify({
                         type: 'name',
                         name: this.userName
                     }));
-                }
+                };
+
+                this.dataChannel.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'message') {
+                            this.displayMessage(data.message, false, data.sender);
+                        } else if (data.type === 'name') {
+                            this.peerName = data.name;
+                            this.updateChatTitle();
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse message:', e);
+                    }
+                };
+
+                this.dataChannel.onclose = () => {
+                    this.onDisconnected();
+                };
+
+                this.dataChannel.onerror = (error) => {
+                    console.error('Data channel error:', error);
+                };
             }
-            
+
+            onDisconnected() {
+                const dot = document.querySelector('.connection-status-dot');
+                const label = document.querySelector('#connectionIndicator span:last-child');
+                if (dot) {
+                    dot.classList.remove('open', 'connecting');
+                    dot.classList.add('closed');
+                }
+                if (label) {
+                    label.textContent = 'Disconnected';
+                }
+                this.addSystemMessage('Peer disconnected.');
+            }
+
+            showStatus(message, type) {
+                const status = document.getElementById('status');
+                status.textContent = message;
+                status.className = 'status ' + type;
+                status.style.display = 'block';
+            }
+
+            showChatScreen() {
+                document.getElementById('setupScreen').style.display = 'none';
+                const chatScreen = document.getElementById('chatScreen');
+                chatScreen.style.display = 'flex';
+                this.updateChatTitle();
+                this.addSystemMessage('Connected! Messages are sent directly peer-to-peer.');
+                document.getElementById('messageInput').focus();
+            }
+
             updateChatTitle() {
-                const title = this.peerName ? `Chat with ${this.peerName}` : 'Chat';
+                const title = this.peerName ? 'Chat with ' + this.peerName : 'Chat';
                 document.getElementById('chatTitle').textContent = title;
             }
-            
+
             sendMessage() {
                 const input = document.getElementById('messageInput');
                 const message = input.value.trim();
-                
+
                 if (!message || !this.dataChannel || this.dataChannel.readyState !== 'open') return;
-                
+
                 this.dataChannel.send(JSON.stringify({
                     type: 'message',
                     message: message,
                     sender: this.userName
                 }));
-                
+
                 this.displayMessage(message, true, this.userName);
                 input.value = '';
+                input.focus();
             }
-            
+
             displayMessage(message, isSent, sender) {
                 const messages = document.getElementById('messages');
                 const messageDiv = document.createElement('div');
-                messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
-                messageDiv.textContent = message;
+                messageDiv.className = 'message ' + (isSent ? 'sent' : 'received');
+
+                const senderDiv = document.createElement('div');
+                senderDiv.className = 'sender';
+                senderDiv.textContent = sender || (isSent ? 'You' : 'Peer');
+
+                const textNode = document.createTextNode(message);
+
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'timestamp';
+                timeDiv.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                messageDiv.appendChild(senderDiv);
+                messageDiv.appendChild(textNode);
+                messageDiv.appendChild(timeDiv);
+
                 messages.appendChild(messageDiv);
                 messages.scrollTop = messages.scrollHeight;
             }
+
+            addSystemMessage(text) {
+                const messages = document.getElementById('messages');
+                const div = document.createElement('div');
+                div.className = 'system-message';
+                div.textContent = text;
+                messages.appendChild(div);
+                messages.scrollTop = messages.scrollHeight;
+            }
         }
-        
+
         const chat = new P2PChat();
     </script>
 </body>
