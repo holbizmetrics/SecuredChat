@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SecuredChat Unit Tests</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 24px; }
+        h1 { margin-bottom: 8px; font-size: 1.4em; }
+        .summary { margin-bottom: 20px; padding: 12px 16px; border-radius: 8px; font-size: 0.95em; }
+        .summary.pass { background: #0d3320; border: 1px solid #2ecc71; }
+        .summary.fail { background: #3d1111; border: 1px solid #e74c3c; }
+        .suite { margin-bottom: 16px; }
+        .suite-name { font-weight: 600; font-size: 1.05em; margin-bottom: 6px; color: #a0a0ff; }
+        .test { padding: 4px 12px; font-size: 0.9em; font-family: monospace; }
+        .test.pass { color: #2ecc71; }
+        .test.pass::before { content: "\2713  "; }
+        .test.fail { color: #e74c3c; }
+        .test.fail::before { content: "\2717  "; }
+        .error-detail { color: #ff8888; padding: 2px 24px; font-size: 0.82em; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h1>SecuredChat Unit Tests</h1>
+    <div id="summary" class="summary"></div>
+    <div id="results"></div>
+
+    <script>
+        // =============================================
+        // Minimal test runner
+        // =============================================
+        const results = [];
+        let currentSuite = '';
+
+        function describe(name, fn) {
+            currentSuite = name;
+            fn();
+        }
+
+        function it(name, fn) {
+            try {
+                fn();
+                results.push({ suite: currentSuite, name, pass: true });
+            } catch (e) {
+                results.push({ suite: currentSuite, name, pass: false, error: e.message });
+            }
+        }
+
+        function expect(val) {
+            return {
+                toBe(expected) {
+                    if (val !== expected) throw new Error(`Expected ${JSON.stringify(expected)}, got ${JSON.stringify(val)}`);
+                },
+                toEqual(expected) {
+                    const a = JSON.stringify(val), b = JSON.stringify(expected);
+                    if (a !== b) throw new Error(`Expected ${b}, got ${a}`);
+                },
+                toThrow(substring) {
+                    if (typeof val !== 'function') throw new Error('Expected a function');
+                    let threw = false, msg = '';
+                    try { val(); } catch (e) { threw = true; msg = e.message; }
+                    if (!threw) throw new Error('Expected function to throw, but it did not');
+                    if (substring && !msg.includes(substring))
+                        throw new Error(`Expected error containing "${substring}", got "${msg}"`);
+                },
+                toBeGreaterThan(n) {
+                    if (!(val > n)) throw new Error(`Expected ${val} > ${n}`);
+                },
+                toMatch(regex) {
+                    if (!regex.test(val)) throw new Error(`Expected "${val}" to match ${regex}`);
+                },
+                toContain(sub) {
+                    if (typeof val === 'string' && !val.includes(sub))
+                        throw new Error(`Expected string containing "${sub}", got "${val}"`);
+                    if (Array.isArray(val) && !val.includes(sub))
+                        throw new Error(`Expected array containing ${JSON.stringify(sub)}`);
+                }
+            };
+        }
+
+        // =============================================
+        // Code under test (copied from SecuredChat.html)
+        // =============================================
+
+        function escapeHtml(text) {
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function formatDuration(seconds) {
+            return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+        }
+
+        class PayloadCodec {
+            static computeChecksum(str) {
+                let sum = 0;
+                for (let i = 0; i < str.length; i++) {
+                    sum = (sum + str.charCodeAt(i) * (i + 1)) & 0xFFFF;
+                }
+                return sum.toString(36);
+            }
+
+            static encode(type, jsonObj) {
+                const json = JSON.stringify(jsonObj);
+                const b64 = btoa(json);
+                const checksum = this.computeChecksum(b64);
+                return type + '.' + b64 + '.' + b64.length + '.' + checksum;
+            }
+
+            static decode(expectedType, raw) {
+                const trimmed = raw.trim();
+                const parts = trimmed.split('.');
+                if (parts.length < 4) {
+                    throw new Error(
+                        'The code looks incomplete. It should start with "' + expectedType + '." \u2014 ' +
+                        'make sure you copied the entire code from start to end.'
+                    );
+                }
+
+                const type = parts[0];
+                const checksum = parts[parts.length - 1];
+                const lengthStr = parts[parts.length - 2];
+                const b64 = parts.slice(1, parts.length - 2).join('.');
+
+                if (type !== expectedType) {
+                    if (type === 'OFFER' && expectedType === 'ANSWER') {
+                        throw new Error(
+                            'This is a room creation code, not a response code. ' +
+                            'You need to paste the code your friend sent BACK to you.'
+                        );
+                    }
+                    if (type === 'ANSWER' && expectedType === 'OFFER') {
+                        throw new Error(
+                            'This is a response code, not a room creation code. ' +
+                            'You need to paste the code from the person who CREATED the room.'
+                        );
+                    }
+                    throw new Error('Unrecognized code format. Make sure you copied the right code.');
+                }
+
+                const expectedLength = parseInt(lengthStr, 10);
+                if (b64.length !== expectedLength) {
+                    const diff = expectedLength - b64.length;
+                    throw new Error(
+                        'The code appears to be truncated (' + diff + ' characters missing). ' +
+                        'This often happens with SMS or apps that cut long messages. ' +
+                        'Try sending the code via email or a notes app instead.'
+                    );
+                }
+
+                const expectedChecksum = this.computeChecksum(b64);
+                if (checksum !== expectedChecksum) {
+                    throw new Error(
+                        'The code appears to be corrupted (some characters changed). ' +
+                        'Try copying it again \u2014 make sure to select the entire code.'
+                    );
+                }
+
+                try {
+                    return JSON.parse(atob(b64));
+                } catch (e) {
+                    throw new Error(
+                        'The code could not be decoded. It may have been modified in transit. ' +
+                        'Try copying it again from the source.'
+                    );
+                }
+            }
+        }
+
+        // =============================================
+        // Tests
+        // =============================================
+
+        describe('escapeHtml', () => {
+            it('escapes ampersands', () => {
+                expect(escapeHtml('a & b')).toBe('a &amp; b');
+            });
+
+            it('escapes angle brackets', () => {
+                expect(escapeHtml('<script>alert("xss")</script>')).toBe('&lt;script&gt;alert("xss")&lt;/script&gt;');
+            });
+
+            it('returns empty string unchanged', () => {
+                expect(escapeHtml('')).toBe('');
+            });
+
+            it('leaves safe text unchanged', () => {
+                expect(escapeHtml('Hello world')).toBe('Hello world');
+            });
+
+            it('handles all three special chars together', () => {
+                expect(escapeHtml('a < b & b > c')).toBe('a &lt; b &amp; b &gt; c');
+            });
+        });
+
+        describe('formatFileSize', () => {
+            it('formats bytes', () => {
+                expect(formatFileSize(500)).toBe('500 B');
+            });
+
+            it('formats kilobytes', () => {
+                expect(formatFileSize(2048)).toBe('2.0 KB');
+            });
+
+            it('formats megabytes', () => {
+                expect(formatFileSize(5242880)).toBe('5.0 MB');
+            });
+
+            it('handles zero', () => {
+                expect(formatFileSize(0)).toBe('0 B');
+            });
+
+            it('handles boundary at 1024', () => {
+                expect(formatFileSize(1024)).toBe('1.0 KB');
+            });
+
+            it('handles boundary at 1MB', () => {
+                expect(formatFileSize(1048576)).toBe('1.0 MB');
+            });
+        });
+
+        describe('formatDuration', () => {
+            it('formats zero seconds', () => {
+                expect(formatDuration(0)).toBe('0:00');
+            });
+
+            it('formats seconds only', () => {
+                expect(formatDuration(45)).toBe('0:45');
+            });
+
+            it('formats minutes and seconds', () => {
+                expect(formatDuration(125)).toBe('2:05');
+            });
+
+            it('pads single-digit seconds', () => {
+                expect(formatDuration(61)).toBe('1:01');
+            });
+
+            it('handles exact minutes', () => {
+                expect(formatDuration(120)).toBe('2:00');
+            });
+        });
+
+        describe('PayloadCodec.computeChecksum', () => {
+            it('returns a base-36 string', () => {
+                const cs = PayloadCodec.computeChecksum('hello');
+                expect(cs).toMatch(/^[0-9a-z]+$/);
+            });
+
+            it('is deterministic', () => {
+                const a = PayloadCodec.computeChecksum('test data');
+                const b = PayloadCodec.computeChecksum('test data');
+                expect(a).toBe(b);
+            });
+
+            it('differs for different inputs', () => {
+                const a = PayloadCodec.computeChecksum('aaa');
+                const b = PayloadCodec.computeChecksum('bbb');
+                expect(a !== b).toBe(true);
+            });
+
+            it('handles empty string', () => {
+                const cs = PayloadCodec.computeChecksum('');
+                expect(cs).toBe('0');
+            });
+        });
+
+        describe('PayloadCodec.encode', () => {
+            it('produces TYPE.base64.length.checksum format', () => {
+                const encoded = PayloadCodec.encode('OFFER', { sdp: 'test' });
+                const parts = encoded.split('.');
+                expect(parts[0]).toBe('OFFER');
+                expect(parts.length >= 4).toBe(true);
+            });
+
+            it('base64 portion decodes back to JSON', () => {
+                const encoded = PayloadCodec.encode('OFFER', { foo: 'bar' });
+                const parts = encoded.split('.');
+                const b64 = parts.slice(1, parts.length - 2).join('.');
+                const decoded = JSON.parse(atob(b64));
+                expect(decoded).toEqual({ foo: 'bar' });
+            });
+
+            it('length field matches base64 length', () => {
+                const encoded = PayloadCodec.encode('ANSWER', { x: 1 });
+                const parts = encoded.split('.');
+                const b64 = parts.slice(1, parts.length - 2).join('.');
+                const lengthField = parseInt(parts[parts.length - 2], 10);
+                expect(lengthField).toBe(b64.length);
+            });
+
+            it('checksum field matches computed checksum', () => {
+                const encoded = PayloadCodec.encode('OFFER', { sdp: 'v=0...' });
+                const parts = encoded.split('.');
+                const b64 = parts.slice(1, parts.length - 2).join('.');
+                const checksum = parts[parts.length - 1];
+                expect(checksum).toBe(PayloadCodec.computeChecksum(b64));
+            });
+        });
+
+        describe('PayloadCodec.decode', () => {
+            it('roundtrips with encode (OFFER)', () => {
+                const original = { sdp: 'v=0\r\no=- 12345', type: 'offer' };
+                const encoded = PayloadCodec.encode('OFFER', original);
+                const decoded = PayloadCodec.decode('OFFER', encoded);
+                expect(decoded).toEqual(original);
+            });
+
+            it('roundtrips with encode (ANSWER)', () => {
+                const original = { sdp: 'v=0\r\no=- 67890', type: 'answer' };
+                const encoded = PayloadCodec.encode('ANSWER', original);
+                const decoded = PayloadCodec.decode('ANSWER', encoded);
+                expect(decoded).toEqual(original);
+            });
+
+            it('roundtrips complex nested objects', () => {
+                const original = { sdp: 'test', candidates: [{ a: 1 }, { b: 2 }], nested: { deep: true } };
+                const encoded = PayloadCodec.encode('OFFER', original);
+                const decoded = PayloadCodec.decode('OFFER', encoded);
+                expect(decoded).toEqual(original);
+            });
+
+            it('tolerates leading/trailing whitespace', () => {
+                const encoded = PayloadCodec.encode('OFFER', { ok: true });
+                const decoded = PayloadCodec.decode('OFFER', '  ' + encoded + '  \n');
+                expect(decoded).toEqual({ ok: true });
+            });
+
+            it('throws on incomplete code (too few parts)', () => {
+                expect(() => PayloadCodec.decode('OFFER', 'OFFER.abc')).toThrow('incomplete');
+            });
+
+            it('throws with helpful message when OFFER given but ANSWER expected', () => {
+                const encoded = PayloadCodec.encode('OFFER', { sdp: 'x' });
+                expect(() => PayloadCodec.decode('ANSWER', encoded)).toThrow('room creation code');
+            });
+
+            it('throws with helpful message when ANSWER given but OFFER expected', () => {
+                const encoded = PayloadCodec.encode('ANSWER', { sdp: 'x' });
+                expect(() => PayloadCodec.decode('OFFER', encoded)).toThrow('response code');
+            });
+
+            it('throws on unrecognized type', () => {
+                const raw = 'BOGUS.' + btoa('{}') + '.4.abc';
+                expect(() => PayloadCodec.decode('OFFER', raw)).toThrow('Unrecognized');
+            });
+
+            it('detects truncation', () => {
+                const encoded = PayloadCodec.encode('OFFER', { sdp: 'some long sdp data here' });
+                const parts = encoded.split('.');
+                // Remove some chars from b64 to simulate truncation
+                parts[1] = parts[1].substring(0, parts[1].length - 5);
+                const truncated = parts.join('.');
+                expect(() => PayloadCodec.decode('OFFER', truncated)).toThrow('truncated');
+            });
+
+            it('detects corruption (modified characters)', () => {
+                const encoded = PayloadCodec.encode('OFFER', { sdp: 'real sdp data' });
+                // Flip a character in the middle of the base64
+                const parts = encoded.split('.');
+                const b64 = parts.slice(1, parts.length - 2).join('.');
+                const corrupted = b64.substring(0, 3) + 'X' + b64.substring(4);
+                // Rebuild with same length but wrong checksum
+                const corruptedCode = parts[0] + '.' + corrupted + '.' + corrupted.length + '.' + parts[parts.length - 1];
+                expect(() => PayloadCodec.decode('OFFER', corruptedCode)).toThrow('corrupted');
+            });
+        });
+
+        // =============================================
+        // Render results
+        // =============================================
+        const passed = results.filter(r => r.pass).length;
+        const failed = results.filter(r => !r.pass).length;
+        const total = results.length;
+
+        const summaryEl = document.getElementById('summary');
+        summaryEl.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+        summaryEl.textContent = `${passed}/${total} passed` + (failed ? `, ${failed} failed` : ' \u2014 all green');
+
+        const container = document.getElementById('results');
+        let lastSuite = '';
+        for (const r of results) {
+            if (r.suite !== lastSuite) {
+                lastSuite = r.suite;
+                const suiteDiv = document.createElement('div');
+                suiteDiv.className = 'suite';
+                const nameDiv = document.createElement('div');
+                nameDiv.className = 'suite-name';
+                nameDiv.textContent = r.suite;
+                suiteDiv.appendChild(nameDiv);
+                suiteDiv.id = 'suite-' + r.suite.replace(/\W/g, '_');
+                container.appendChild(suiteDiv);
+            }
+            const suiteDiv = document.getElementById('suite-' + r.suite.replace(/\W/g, '_'));
+            const testDiv = document.createElement('div');
+            testDiv.className = 'test ' + (r.pass ? 'pass' : 'fail');
+            testDiv.textContent = r.name;
+            suiteDiv.appendChild(testDiv);
+            if (!r.pass) {
+                const errDiv = document.createElement('div');
+                errDiv.className = 'error-detail';
+                errDiv.textContent = r.error;
+                suiteDiv.appendChild(errDiv);
+            }
+        }
+
+        document.title = `Tests: ${passed}/${total}` + (failed ? ` (${failed} FAILED)` : ' PASS');
+    </script>
+</body>
+</html>

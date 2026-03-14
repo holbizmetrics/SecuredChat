@@ -1,0 +1,26 @@
+{
+  "name": "securedchat",
+  "version": "1.0.0",
+  "description": "Direct browser-to-browser messaging via WebRTC. No server. No account. One HTML file.",
+  "main": "run_tests.js",
+  "scripts": {
+    "test": "node run_tests.js && npx playwright test",
+    "test:unit": "node run_tests.js",
+    "test:webkit": "npx playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holbizmetrics/SecuredChat.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/holbizmetrics/SecuredChat/issues"
+  },
+  "homepage": "https://github.com/holbizmetrics/SecuredChat#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "serve": "^14.2.6"
+  }
+}
