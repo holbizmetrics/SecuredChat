@@ -381,14 +381,16 @@
         }
 
         .code-box {
-            background: #f1f3f5;
-            border: 1px solid #dee2e6;
+            background: var(--toolbar-bg);
+            border: 1px solid var(--input-border);
             padding: 0.6rem;
             border-radius: 6px;
             font-family: monospace;
             font-size: 0.78rem;
             margin: 0.5rem 0;
             word-break: break-all;
+            max-height: 80px;
+            overflow-y: auto;
             max-height: 80px;
             overflow-y: auto;
             user-select: all;
@@ -1555,7 +1557,7 @@
                         <div class="code-box" id="hostOffer"></div>
                         <div class="code-length" id="hostOfferLength"></div>
                         <div class="code-actions">
-                            <button class="btn btn-small" id="copyOfferBtn">Copy Code</button>
+                            <button class="btn" id="copyOfferBtn" style="width:100%;font-size:1.1rem;padding:0.8rem;">&#x1F4CB; Copy Code to Clipboard</button>
                         </div>
                     </div>
 
@@ -1570,6 +1572,7 @@
                         <div class="input-group" style="margin-bottom: 0.5rem;">
                             <textarea id="hostAnswerInput" placeholder="Paste the response code here..." rows="3"></textarea>
                         </div>
+                        <button class="btn" id="pasteHostAnswerBtn" style="width:100%;margin-bottom:0.5rem;background:#43a047;">&#x1F4CB; Paste from Clipboard</button>
                         <button class="btn" id="hostConnectBtn">Connect</button>
                     </div>
                 </div>
@@ -1586,6 +1589,7 @@
                         <label>Paste the code from the host:</label>
                         <textarea id="connectionId" placeholder="Paste the code you received here..." rows="3"></textarea>
                     </div>
+                    <button class="btn" id="pasteJoinCodeBtn" style="width:100%;margin-bottom:0.5rem;background:#43a047;">&#x1F4CB; Paste from Clipboard</button>
                     <button class="btn" id="joinRoomBtn">Join Chat Room</button>
                 </div>
 
@@ -1602,7 +1606,7 @@
                         <div class="code-box" id="joinerAnswer"></div>
                         <div class="code-length" id="joinerAnswerLength"></div>
                         <div class="code-actions">
-                            <button class="btn btn-small" id="copyAnswerBtn">Copy Code</button>
+                            <button class="btn" id="copyAnswerBtn" style="width:100%;font-size:1.1rem;padding:0.8rem;">&#x1F4CB; Copy Code to Clipboard</button>
                         </div>
                     </div>
                     <div class="status info">
@@ -2181,6 +2185,24 @@
 
                 document.getElementById('copyAnswerBtn').addEventListener('click', () => {
                     this.copyToClipboard('joinerAnswer', 'copyAnswerBtn');
+                });
+
+                // Paste buttons for mobile convenience
+                document.getElementById('pasteHostAnswerBtn').addEventListener('click', async () => {
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        document.getElementById('hostAnswerInput').value = text;
+                    } catch (e) {
+                        this.showStatus('Paste failed — try long-pressing the text field and pasting manually.', 'error');
+                    }
+                });
+                document.getElementById('pasteJoinCodeBtn').addEventListener('click', async () => {
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        document.getElementById('connectionId').value = text;
+                    } catch (e) {
+                        this.showStatus('Paste failed — try long-pressing the text field and pasting manually.', 'error');
+                    }
                 });
 
                 // Formatting toolbar
@@ -3744,7 +3766,23 @@
                 this.pc = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun.relay.metered.ca:80' },
+                        {
+                            urls: 'turn:global.relay.metered.ca:80',
+                            username: 'e8dd65b92a0b2bbf4daa972e',
+                            credential: '5VuclGBYB7VodDTi'
+                        },
+                        {
+                            urls: 'turn:global.relay.metered.ca:443',
+                            username: 'e8dd65b92a0b2bbf4daa972e',
+                            credential: '5VuclGBYB7VodDTi'
+                        },
+                        {
+                            urls: 'turn:global.relay.metered.ca:443?transport=tcp',
+                            username: 'e8dd65b92a0b2bbf4daa972e',
+                            credential: '5VuclGBYB7VodDTi'
+                        }
                     ]
                 });
 
