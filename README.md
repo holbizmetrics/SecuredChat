@@ -78,6 +78,17 @@ Both people must have the page open at the same time. The codes are long — alw
 
 Each version is a separate commit in this repo — use `git log` to see the full evolution.
 
+## Headless / agent use
+
+`SecuredChat.html` is the browser app for humans. For automated callers
+(scripts, agents, Prometheus architectures), a sibling Python CLI lives
+in [`cli/`](cli/README.md). It speaks the same conceptual chat room but
+uses a different transport (today: append-only JSONL over a dedicated
+git bus repo; planned: aiortc WebRTC with SDP bootstrapped over the bus).
+
+The HTML and the CLI are dual-purpose siblings — neither replaces the
+other.
+
 ## License
 
 MIT
