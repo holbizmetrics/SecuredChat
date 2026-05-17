@@ -67,7 +67,7 @@ class Transport(ABC):
     def recv(self, since_id: str | None = None) -> list[Message]: ...
 
     @abstractmethod
-    def watch(self, poll_seconds: float = 5.0) -> Iterator[Message]: ...
+    def watch(self, poll_seconds: float = 5.0, since_id: str | None = None) -> Iterator[Message]: ...
 
 
 class GitBusTransport(Transport):
@@ -145,8 +145,8 @@ class GitBusTransport(Transport):
                 return msgs[i + 1 :]
         return msgs
 
-    def watch(self, poll_seconds: float = 5.0) -> Iterator[Message]:
-        last_id: str | None = None
+    def watch(self, poll_seconds: float = 5.0, since_id: str | None = None) -> Iterator[Message]:
+        last_id: str | None = since_id
         seen: set[str] = set()
         while True:
             for m in self.recv(since_id=last_id):

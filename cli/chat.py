@@ -80,6 +80,8 @@ def cmd_recv(args: argparse.Namespace) -> None:
     msgs = t.recv(since_id=args.since)
     if args.addressed_to_me:
         msgs = [m for m in msgs if m.to in (None, identity)]
+    if args.exclude_self:
+        msgs = [m for m in msgs if m.from_ != identity]
     if args.json:
         for m in msgs:
             print(m.to_jsonl())
@@ -96,8 +98,10 @@ def cmd_watch(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
     try:
-        for m in t.watch(poll_seconds=args.poll):
+        for m in t.watch(poll_seconds=args.poll, since_id=args.since):
             if args.addressed_to_me and m.to not in (None, identity):
+                continue
+            if args.exclude_self and m.from_ == identity:
                 continue
             if args.json:
                 print(m.to_jsonl(), flush=True)
@@ -138,15 +142,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="filter to messages addressed to me or broadcast",
     )
+    s_recv.add_argument(
+        "--exclude-self",
+        action="store_true",
+        help="skip messages where from == this identity (suppress self-echo)",
+    )
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
     s_recv.set_defaults(func=cmd_recv)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")
+    s_watch.add_argument("--since", help="start after this message id (skip backlog)")
     s_watch.add_argument(
         "--addressed-to-me",
         action="store_true",
         help="filter to messages addressed to me or broadcast",
+    )
+    s_watch.add_argument(
+        "--exclude-self",
+        action="store_true",
+        help="skip messages where from == this identity (suppress self-echo)",
     )
     s_watch.add_argument("--json", action="store_true", help="output as JSONL")
     s_watch.set_defaults(func=cmd_watch)
