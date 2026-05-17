@@ -28,6 +28,28 @@ CONFIG_ENV_BUS = "SECUREDCHAT_BUS"
 CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 
+LAST_SEEN_FILE = Path.home() / ".config" / "securedchat" / "last-seen-id"
+
+
+def _read_last_seen() -> str | None:
+    try:
+        v = LAST_SEEN_FILE.read_text().strip()
+        return v or None
+    except FileNotFoundError:
+        return None
+
+
+def _write_last_seen(msg_id: str) -> None:
+    LAST_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_SEEN_FILE.write_text(msg_id + "\n")
+
+
+def _summary_line(m: "Message", body_width: int) -> str:
+    body = m.body.replace("\n", " ").replace("\r", " ")
+    if len(body) > body_width:
+        body = body[: body_width - 1] + "…"
+    return f"{m.id[:8]}  {m.from_:<16}  {m.kind:<10}  {body}"
+
 
 def _resolve_config(args: argparse.Namespace) -> tuple[Path, str, str]:
     bus = args.bus or os.environ.get(CONFIG_ENV_BUS)
@@ -77,11 +99,17 @@ def cmd_send(args: argparse.Namespace) -> None:
 def cmd_recv(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
-    msgs = t.recv(since_id=args.since)
+    since = args.since if args.since is not None else _read_last_seen()
+    msgs = t.recv(since_id=since)
     if args.addressed_to_me:
         msgs = [m for m in msgs if m.to in (None, identity)]
     if args.exclude_self:
         msgs = [m for m in msgs if m.from_ != identity]
+    if args.summary:
+        print(f"{len(msgs)} pending")
+        for m in msgs:
+            print(_summary_line(m, args.summary_width))
+        return
     if args.json:
         for m in msgs:
             print(m.to_jsonl())
@@ -94,11 +122,17 @@ def cmd_recv(args: argparse.Namespace) -> None:
         print(f"{prefix} {m.body}")
 
 
+def cmd_mark_seen(args: argparse.Namespace) -> None:
+    _write_last_seen(args.id)
+    print(f"last-seen-id: {args.id} ({LAST_SEEN_FILE})")
+
+
 def cmd_watch(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
+    since = args.since if args.since is not None else _read_last_seen()
     try:
-        for m in t.watch(poll_seconds=args.poll, since_id=args.since):
+        for m in t.watch(poll_seconds=args.poll, since_id=since):
             if args.addressed_to_me and m.to not in (None, identity):
                 continue
             if args.exclude_self and m.from_ == identity:
@@ -147,8 +181,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip messages where from == this identity (suppress self-echo)",
     )
+    s_recv.add_argument(
+        "--summary",
+        action="store_true",
+        help="one-line-per-message: '<count> pending' then 'ID8 FROM KIND BODY[:W]'",
+    )
+    s_recv.add_argument(
+        "--summary-width",
+        type=int,
+        default=80,
+        help="body preview width for --summary (default 80)",
+    )
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
     s_recv.set_defaults(func=cmd_recv)
+
+    s_mark = sub.add_parser(
+        "mark-seen",
+        help=f"write message id to {LAST_SEEN_FILE} (recv --since default source)",
+    )
+    s_mark.add_argument("id", help="full message id (must match exactly; recv uses == comparison)")
+    s_mark.set_defaults(func=cmd_mark_seen)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")
