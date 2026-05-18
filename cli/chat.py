@@ -249,7 +249,30 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _force_utf8_io() -> None:
+    """Force stdout/stderr to UTF-8 on Windows.
+
+    Bus messages contain arbitrary Unicode (arrows in identity prefixes,
+    emoji, math symbols, non-Latin scripts). Windows defaults stdout to
+    cp1252, which raises UnicodeEncodeError on the first non-encodable
+    character. This makes the CLI usable cross-platform without requiring
+    callers to set PYTHONIOENCODING=utf-8.
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
+    _force_utf8_io()
     args = build_parser().parse_args(argv)
     args.func(args)
 
