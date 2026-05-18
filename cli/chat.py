@@ -99,6 +99,29 @@ def cmd_send(args: argparse.Namespace) -> None:
 def cmd_recv(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
+    if args.id:
+        # --id: fetch one specific message by id (full or prefix). Bypasses
+        # --since / --addressed-to-me / --exclude-self filters — when you have
+        # a specific id you want THAT message regardless. Recovery path for
+        # truncated previews surfaced by upstream monitors.
+        all_msgs = t.recv(since_id=None)
+        matches = [m for m in all_msgs if m.id.startswith(args.id)]
+        if not matches:
+            sys.exit(f"no message matches id prefix: {args.id}")
+        if len(matches) > 1:
+            ids = ", ".join(m.id[:12] for m in matches)
+            sys.exit(f"ambiguous id prefix {args.id!r} matches {len(matches)} messages: {ids}")
+        m = matches[0]
+        if args.json:
+            print(m.to_jsonl())
+            return
+        prefix = f"[{m.from_}"
+        if m.to:
+            prefix += f"→{m.to}"
+        prefix += f" id={m.id[:12]} kind={m.kind}]"
+        print(prefix)
+        print(m.body)
+        return
     since = args.since if args.since is not None else _read_last_seen()
     msgs = t.recv(since_id=since)
     if args.addressed_to_me:
@@ -170,6 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
     s_send.set_defaults(func=cmd_send)
 
     s_recv = sub.add_parser("recv", help="print messages")
+    s_recv.add_argument(
+        "--id",
+        help="fetch a single message by full id or prefix (recovery path for "
+             "truncated previews; bypasses --since / --addressed-to-me / --exclude-self)",
+    )
     s_recv.add_argument("--since", help="only messages after this message id")
     s_recv.add_argument(
         "--addressed-to-me",
