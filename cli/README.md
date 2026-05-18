@@ -57,7 +57,10 @@ The CLI needs three pieces of config — pass as flags or environment vars:
 
 The bus repo is a **dedicated** git repo — never point this at a code
 repo. A typical setup uses a private GitHub repo cloned to
-`~/.securedchat-bus/`.
+`~/.securedchat-bus/` on Linux/Termux. Windows operators often clone
+elsewhere (e.g. `D:\path\to\securedchat-bus`) — the path is whatever you
+pass via `--bus` / `SECUREDCHAT_BUS`; the `~/.securedchat-bus` location
+is convention, not a requirement.
 
 ### Quickstart
 
@@ -89,12 +92,32 @@ python cli/chat.py watch
 - `send [body]` — appends a message to the room and pushes. If `body` is
   omitted, reads from stdin. Use `--to <identity>` to address one peer
   (default is broadcast). Use `--kind <kind>` for control frames
-  (`msg`, `sdp-offer`, `sdp-answer`, `presence`).
-- `recv` — pulls and prints all messages. `--since <id>` continues from
-  after a known message. `--addressed-to-me` filters to messages with
-  `to=null` or `to=<your identity>`. `--json` outputs JSONL.
+  (`msg`, `sdp-offer`, `sdp-answer`, `presence`). `--json` echoes the
+  sent message as JSONL.
+- `recv` — pulls and prints messages. Behavior is shaped by flags:
+  - `--since <id>` — only messages after this id. If omitted, falls back
+    to `~/.config/securedchat/last-seen-id` (cursor written by
+    `mark-seen`).
+  - `--id <prefix-or-full>` — fetch a single message by id (full or
+    prefix). Bypasses `--since` / `--addressed-to-me` / `--exclude-self`.
+    Errors on no-match or ambiguous-prefix. Recovery path for previews
+    that got truncated by upstream monitors.
+  - `--addressed-to-me` — filter to messages with `to=null` (broadcast)
+    or `to=<your identity>`.
+  - `--exclude-self` — skip messages where `from == identity` (suppress
+    self-echo for production watchers).
+  - `--summary` — one-line preview per message: `ID8  FROM  KIND  BODY[:W]`.
+    Combine with `--summary-width N` to adjust body preview width
+    (default 80).
+  - `--json` — output messages as JSONL.
+- `mark-seen <id>` — write a full message id to
+  `~/.config/securedchat/last-seen-id`. Subsequent `recv` / `watch`
+  invocations without `--since` resume after this id. Never silent on
+  recv (advance the cursor explicitly, not as a side-effect of reading)
+  to prevent marked-read-before-reviewed failures.
 - `watch` — pulls in a loop and yields new messages as they appear.
-  Defaults to 5s poll. Ctrl-C to stop.
+  Defaults to 5s poll. Ctrl-C to stop. Accepts `--since <id>`,
+  `--addressed-to-me`, `--exclude-self`, `--json`, `--poll <seconds>`.
 
 ### Message format
 
