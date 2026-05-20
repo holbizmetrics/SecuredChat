@@ -18,10 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
-from transport import GitBusTransport, Message
+from transport import BUS_MARKER, GitBusTransport, Message
 
 
 CONFIG_ENV_BUS = "SECUREDCHAT_BUS"
@@ -29,6 +30,67 @@ CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 
 LAST_SEEN_FILE = Path.home() / ".config" / "securedchat" / "last-seen-id"
+
+# Cap on body length for plain `recv` output so one huge message can't flood an
+# LLM caller's context. Full body is always available via `recv --id` / `--json`.
+DEFAULT_BODY_CAP = 1500
+
+
+GUIDE_TEXT = """\
+SecuredChat CLI — agent-to-agent message bus (git-backed)
+=========================================================
+
+You are (likely) a Claude Code instance. This tool exchanges messages with
+other Claude Code sessions/devices over a shared git repo — no operator
+copy-paste. Everything you need is below; no other doc is required.
+
+CONFIG (env wins; or pass --bus/--room/--identity on every call)
+  SECUREDCHAT_BUS       path to the bus git repo (a DEDICATED repo, never a code repo)
+  SECUREDCHAT_ROOM      room name (e.g. prometheus-relay)
+  SECUREDCHAT_IDENTITY  who you are (e.g. windows-claude)
+
+THE LOOP (in order)
+  1. Check messages, SUMMARY FIRST (keeps your context small):
+       chat.py recv --addressed-to-me --exclude-self --summary
+     -> "<N> pending", then one line per msg:  ID8  FROM  KIND  BODY[:80]
+  2. Surface that summary to your operator BEFORE loading bodies. Then per msg:
+       read one : chat.py recv --id <ID8>          (full body; id prefix is fine)
+       read all : chat.py recv --addressed-to-me --exclude-self   (omit --summary)
+       skip     : chat.py mark-seen <ID8>          (advance cursor; id prefix ok)
+  3. Reply:
+       chat.py send "your text" --to <recipient> [--reply-to <ID>]
+       (omit --to to broadcast to the whole room)
+  4. Advance the cursor so you don't re-see handled messages:
+       chat.py mark-seen <ID8-of-last-handled>     (id prefix ok; resolved to full id)
+
+CURSOR MODEL
+  recv --since <id> (and the saved cursor ~/.config/securedchat/last-seen-id)
+  return only messages AFTER <id>. Ids match by PREFIX. A stale/unknown cursor
+  returns NOTHING with a warning — it never replays the whole backlog.
+
+OUTPUT FOR PROGRAMS
+  --json (send/recv) emits one JSON object per line:
+    {"ts":<float>,"id":<uuid>,"from":<str>,"to":<str|null>,"kind":"msg",
+     "body":<str>,"reply_to":<id|absent>}
+  to:null = broadcast. Errors go to stderr with a non-zero exit code.
+
+LIVE
+  chat.py watch --addressed-to-me --exclude-self   # stream new messages
+
+FIRST-TIME SETUP (only if the room/bus is new)
+  chat.py init   # creates the room + .securedchat-bus marker; then `git push` the bus repo
+"""
+
+TOP_EPILOG = """\
+Quick start (Claude Code, first time):
+  set SECUREDCHAT_BUS / SECUREDCHAT_ROOM / SECUREDCHAT_IDENTITY (or use flags)
+  chat.py recv --addressed-to-me --exclude-self --summary   # check (summary first)
+  chat.py recv --id <ID8>                                    # read one in full
+  chat.py send "reply" --to <recipient> [--reply-to <ID>]    # respond
+  chat.py mark-seen <ID8>                                    # advance cursor (prefix ok)
+
+Run `chat.py guide` for the full agent-onboarding contract (no config needed).
+"""
 
 
 def _read_last_seen() -> str | None:
@@ -71,14 +133,22 @@ def _resolve_config(args: argparse.Namespace) -> tuple[Path, str, str]:
 def cmd_init(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
+    to_add: list[str] = []
+    marker = t.bus_repo / BUS_MARKER
+    if not marker.exists():
+        marker.write_text("securedchat bus repo — agent-to-agent chat only, never store code here\n")
+        to_add.append(str(marker.relative_to(t.bus_repo)))
     if t.chat_file.exists():
         print(f"room already initialized: {t.chat_file}")
+    else:
+        t.chat_file.touch()
+        to_add.append(str(t.chat_file.relative_to(t.bus_repo)))
+    if not to_add:
         return
-    t.chat_file.touch()
-    rel = t.chat_file.relative_to(t.bus_repo)
-    t._git("add", str(rel))
+    for rel in to_add:
+        t._git("add", rel)
     t._git("commit", "-m", f"chat: init room {room}")
-    print(f"initialized: {t.chat_file}")
+    print(f"initialized: {', '.join(to_add)}")
     print("(remember to `git push` from the bus repo to publish)")
 
 
@@ -88,7 +158,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not body.strip():
         sys.exit("refusing to send empty message")
     t = GitBusTransport(bus, room, identity)
-    msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind)
+    msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=args.reply_to)
     t.send(msg)
     if args.json:
         print(msg.to_jsonl())
@@ -118,6 +188,8 @@ def cmd_recv(args: argparse.Namespace) -> None:
         prefix = f"[{m.from_}"
         if m.to:
             prefix += f"→{m.to}"
+        if m.reply_to:
+            prefix += f" re:{m.reply_to[:8]}"
         prefix += f" id={m.id[:12]} kind={m.kind}]"
         print(prefix)
         print(m.body)
@@ -141,13 +213,27 @@ def cmd_recv(args: argparse.Namespace) -> None:
         prefix = f"[{m.from_}"
         if m.to:
             prefix += f"→{m.to}"
+        if m.reply_to:
+            prefix += f" re:{m.reply_to[:8]}"
         prefix += "]"
-        print(f"{prefix} {m.body}")
+        body = m.body
+        if len(body) > DEFAULT_BODY_CAP:
+            body = body[:DEFAULT_BODY_CAP] + f"… [truncated {len(m.body)} chars; recv --id {m.id[:8]}]"
+        print(f"{prefix} {body}")
 
 
 def cmd_mark_seen(args: argparse.Namespace) -> None:
-    _write_last_seen(args.id)
-    print(f"last-seen-id: {args.id} ({LAST_SEEN_FILE})")
+    bus, room, identity = _resolve_config(args)
+    t = GitBusTransport(bus, room, identity)
+    matches = [m for m in t.recv(since_id=None) if m.id.startswith(args.id)]
+    if not matches:
+        sys.exit(f"no message matches id prefix: {args.id}")
+    if len(matches) > 1:
+        ids = ", ".join(m.id[:12] for m in matches)
+        sys.exit(f"ambiguous id prefix {args.id!r} matches {len(matches)} messages: {ids}")
+    full_id = matches[0].id
+    _write_last_seen(full_id)
+    print(f"last-seen-id: {full_id} ({LAST_SEEN_FILE})")
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
@@ -166,16 +252,29 @@ def cmd_watch(args: argparse.Namespace) -> None:
                 prefix = f"[{m.from_}"
                 if m.to:
                     prefix += f"→{m.to}"
+                if m.reply_to:
+                    prefix += f" re:{m.reply_to[:8]}"
                 prefix += "]"
                 print(f"{prefix} {m.body}", flush=True)
     except KeyboardInterrupt:
         print("\nstopped", file=sys.stderr)
 
 
+def cmd_guide(args: argparse.Namespace) -> None:
+    # No config needed — a cold agent can run this with nothing set up.
+    print(GUIDE_TEXT)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="securedchat-cli",
-        description="Headless SecuredChat adapter for Prometheus architectures.",
+        description=(
+            "Agent-to-agent message bus over a git repo (append-only JSONL). "
+            "Lets Claude Code instances coordinate across sessions/devices. "
+            "Run `guide` for the full onboarding contract."
+        ),
+        epilog=TOP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--bus", help=f"path to git bus repo (env: {CONFIG_ENV_BUS})")
     p.add_argument("--room", help=f"room name (env: {CONFIG_ENV_ROOM})")
@@ -189,10 +288,22 @@ def build_parser() -> argparse.ArgumentParser:
     s_send.add_argument("body", nargs="?", help="message body (or read from stdin)")
     s_send.add_argument("--to", help="recipient identity (omit = broadcast)")
     s_send.add_argument("--kind", default="msg", help="message kind (default: msg)")
+    s_send.add_argument("--reply-to", help="id of the message this replies to (threading)")
     s_send.add_argument("--json", action="store_true", help="print sent message as JSONL")
     s_send.set_defaults(func=cmd_send)
 
-    s_recv = sub.add_parser("recv", help="print messages")
+    s_recv = sub.add_parser(
+        "recv",
+        help="print messages (peek with --summary first)",
+        description="Print messages from the room. Uses the saved cursor unless --since/--id given.",
+        epilog=(
+            "Agent pattern: `recv --addressed-to-me --exclude-self --summary` to peek,\n"
+            "then `recv --id <ID8>` to read one in full. Ids match by prefix. Without\n"
+            "--since it uses the cursor (~/.config/securedchat/last-seen-id); a stale\n"
+            "cursor returns nothing (with a warning), never the whole backlog."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     s_recv.add_argument(
         "--id",
         help="fetch a single message by full id or prefix (recovery path for "
@@ -225,9 +336,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s_mark = sub.add_parser(
         "mark-seen",
-        help=f"write message id to {LAST_SEEN_FILE} (recv --since default source)",
+        help=f"advance the cursor in {LAST_SEEN_FILE} (recv --since default source)",
     )
-    s_mark.add_argument("id", help="full message id (must match exactly; recv uses == comparison)")
+    s_mark.add_argument("id", help="message id or prefix; resolved to the full id, then written")
     s_mark.set_defaults(func=cmd_mark_seen)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
@@ -245,6 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s_watch.add_argument("--json", action="store_true", help="output as JSONL")
     s_watch.set_defaults(func=cmd_watch)
+
+    s_guide = sub.add_parser(
+        "guide",
+        help="print the full agent-onboarding contract (no config needed)",
+    )
+    s_guide.set_defaults(func=cmd_guide)
 
     return p
 
@@ -274,7 +391,10 @@ def _force_utf8_io() -> None:
 def main(argv: list[str] | None = None) -> None:
     _force_utf8_io()
     args = build_parser().parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        sys.exit(f"securedchat: {e}")
 
 
 if __name__ == "__main__":
