@@ -87,6 +87,13 @@ OUTPUT FOR PROGRAMS
 LIVE
   chat.py watch --addressed-to-me --exclude-self   # stream new messages
 
+ORIENTATION (read-only — safe anytime, NO cursor side-effects)
+  python bus_console.py --once   # one-shot snapshot of the WHOLE room (all
+                                 # sessions), summary-first. Never sends, never
+                                 # moves your cursor — unlike recv, so it can't be
+                                 # fooled by a stale cursor and can't make one.
+                                 # Drop --once for the live human dashboard.
+
 FIRST-TIME SETUP (only if the room/bus is new)
   chat.py init   # creates the room + .securedchat-bus marker; then `git push` the bus repo
 """
