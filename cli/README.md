@@ -192,6 +192,39 @@ permissions, escalate over the bus) ↔ **yolo** (skip all — never).
 **Dual-use insight:** *viewing* the channel serves both audiences (human
 dashboard, agent monitor); only *acting* (`send` / `mark-seen`) is agent-primary.
 
+## Auto-start on session open (opt-in)
+
+By default a session is reachable only *after* someone wires a monitor in it. To
+make a session reachable **on open**, wire `cli/sessionstart_hook.py` as a Claude
+Code `SessionStart` hook. At startup the hook emits (into the session's context)
+the instruction to do the boot bus check and start the live monitor via the
+Monitor tool — so the agent flips the switch itself.
+
+A hook can't stream the monitor directly — notification routing is the Monitor
+*tool*'s job, which is agent-invoked; the hook's load-bearing act is *telling the
+agent to call it*. The hook itself does no network/git, so it's fast and can
+never block or fail session start.
+
+`.claude/settings.local.json` in the project you want reachable:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+        "command": "python /ABS/PATH/SecuredChat/cli/sessionstart_hook.py --identity <you>" } ] }
+    ]
+  }
+}
+```
+
+Add `--heartbeat 120` to also advertise presence.
+
+**Keep it opt-in and scoped.** Enable it per-project (`settings.local.json`), not
+globally — every enabled session starts a background poll (and, with
+`--heartbeat`, pushes presence on a timer). You do not want *every* session
+remotely reachable; pick the ones you do.
+
 ### Message format
 
 Each line in `chat.jsonl` is a self-contained JSON object:
