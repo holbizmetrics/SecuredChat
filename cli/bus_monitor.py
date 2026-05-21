@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -64,6 +66,18 @@ def resolve(args: argparse.Namespace) -> tuple[Path, str, str]:
     return Path(bus), room, identity
 
 
+def _heartbeat_loop(t: GitBusTransport, interval: float, stop: threading.Event) -> None:
+    """Advertise this identity's presence every `interval` seconds while the
+    monitor runs, so a watching session also shows up as 'online' to others.
+    Errors are non-fatal (a flaky heartbeat must not kill the watcher)."""
+    while not stop.is_set():
+        try:
+            t.announce_presence()
+        except Exception as e:  # noqa: BLE001 — heartbeat must never crash the monitor
+            print(f"securedchat: presence heartbeat error: {e}", file=sys.stderr)
+        stop.wait(interval)
+
+
 def emit(m: Message, body_width: int) -> None:
     body = (m.body or "").replace("\n", " ").replace("\r", " ")
     if len(body) > body_width:
@@ -87,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="also report my own sent messages (default: excluded)")
     p.add_argument("--since", help="start anchor message id (default: current head — no backlog replay)")
     p.add_argument("--body-width", type=int, default=120, help="BUS_MSG body preview width (default 120)")
+    p.add_argument("--heartbeat", type=float, default=0.0,
+                   help="also advertise presence every N seconds while watching (0 = off, default)")
     args = p.parse_args(argv)
 
     force_utf8_io()
@@ -100,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         existing = t.recv(since_id=None)
         since = existing[-1].id if existing else None
 
+    stop = threading.Event()
+    if args.heartbeat and args.heartbeat > 0:
+        threading.Thread(target=_heartbeat_loop, args=(t, args.heartbeat, stop),
+                         daemon=True).start()
+        print(f"securedchat: presence heartbeat every {args.heartbeat:g}s", file=sys.stderr)
+
     print("MONITOR_READY", flush=True)
     try:
         # transport.watch keeps an in-memory cursor and (post-A1 fix) re-anchors
@@ -112,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
             emit(m, args.body_width)
     except KeyboardInterrupt:
         print("MONITOR_STOPPED", file=sys.stderr)
+    finally:
+        stop.set()
     return 0
 
 

@@ -135,6 +135,14 @@ python cli/chat.py watch
   when the channel is quiet. Default keep-last 200.
 - `guide` — print the full agent-onboarding contract (no config needed).
   A cold Claude instance runs this to learn the loop end to end.
+- `presence` — liveness. Default lists who's been seen and how long ago
+  (`online` if within `--window`, default 300s). `--beat` runs a heartbeat
+  loop advertising this identity; `--once` emits a single heartbeat. Backed by
+  one overwritten JSON file per identity under `<room>/presence/` — never
+  appended (so it can't grow) and never written into `chat.jsonl`. Different
+  identities never conflict (each writes only its own file). The dashboard
+  shows an `online:` line; `bus_monitor.py --heartbeat N` listens and
+  advertises in one process.
 
 ## Companion tools — view it (human) / react to it (agent)
 

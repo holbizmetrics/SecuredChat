@@ -144,6 +144,26 @@ class KeyReader:
 # --------------------------------------------------------------------------- #
 # View model
 # --------------------------------------------------------------------------- #
+def _age(seconds: float) -> str:
+    s = int(max(0, seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
+def online_str(t: GitBusTransport, window: float = 300.0) -> str | None:
+    """Identities seen within `window` seconds, as 'id(age) id(age) ...'. Reads
+    presence WITHOUT pulling (the dashboard's recv already refreshed the repo)."""
+    try:
+        pres = t.read_presence(pull=False)
+    except Exception:
+        return None
+    live = [r for r in pres if r["age"] <= window]
+    return "  ".join(f"{r['identity']}({_age(r['age'])})" for r in live) if live else "none"
+
+
 def apply_filter(messages: list[Message], identity: str, me_only: bool, text: str) -> list[Message]:
     out = messages
     if me_only:
@@ -156,11 +176,11 @@ def apply_filter(messages: list[Message], identity: str, me_only: bool, text: st
     return out
 
 
-def render(messages, *, identity, room, me_only, text_filter, new_ids, poll, cols, rows):
+def render(messages, *, identity, room, me_only, text_filter, new_ids, poll, cols, rows, online=None):
     """Return (frame_str, shown_list, start_index). shown_list[i] is the message
     displayed at row number start_index+i."""
     fmsgs = apply_filter(messages, identity, me_only, text_filter)
-    visible = max(3, rows - 4)
+    visible = max(3, rows - 5)
     shown = fmsgs[-visible:]
     start_index = len(fmsgs) - len(shown) + 1 if fmsgs else 1
 
@@ -168,7 +188,10 @@ def render(messages, *, identity, room, me_only, text_filter, new_ids, poll, col
     new_n = sum(1 for m in fmsgs if m.id in new_ids)
     head = (f"{room}   me: {identity}   filter: {flt}   * live {poll:g}s   "
             f"({len(fmsgs)} msgs{', ' + str(new_n) + ' new' if new_n else ''})")
-    lines = [head[:cols], "-" * cols]
+    lines = [head[:cols]]
+    if online is not None:
+        lines.append(f"online: {online}"[:cols])
+    lines.append("-" * cols)
 
     for i, m in enumerate(shown, start=start_index):
         is_new = m.id in new_ids
@@ -256,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         frame, _, _ = render(messages, identity=identity, room=room, me_only=me_only,
                              text_filter=text_filter, new_ids=new_ids, poll=args.poll,
-                             cols=cols, rows=rows)
+                             cols=cols, rows=rows, online=online_str(t))
         print(frame)
         return 0
 
@@ -286,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                 frame, shown, start = render(
                     messages, identity=identity, room=room, me_only=me_only,
                     text_filter=text_filter, new_ids=new_ids, poll=args.poll,
-                    cols=cols, rows=rows)
+                    cols=cols, rows=rows, online=online_str(t))
                 sys.stdout.write(frame)
                 sys.stdout.flush()
 

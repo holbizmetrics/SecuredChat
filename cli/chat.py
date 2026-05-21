@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from transport import BUS_MARKER, GitBusTransport, Message
@@ -109,6 +110,13 @@ REACT ON YOUR OWN (background monitor, for an unattended session)
   report back (send --to <them>) and wait for the operator (maybe on another
   device) to approve by replying. step (surface+wait) <-> act-within-perms &
   escalate-on-bus <-> skip-all (never).
+
+WHO'S ONLINE (presence / liveness)
+  chat.py presence              # list identities + how long since each was seen
+  chat.py presence --beat       # heartbeat loop: advertise yourself as online
+  bus_monitor.py --heartbeat 120  # listen AND advertise in one process
+  Presence is one small overwritten file per identity (never grows, never
+  pollutes chat.jsonl). "online" = seen within --window seconds (default 300).
 
 FIRST-TIME SETUP (only if the room/bus is new)
   chat.py init   # creates the room + .securedchat-bus marker; then `git push` the bus repo
@@ -346,6 +354,41 @@ def cmd_compact(args: argparse.Namespace) -> None:
         print(f"compacted: archived {n} message(s); kept last {args.keep_last} in chat.jsonl")
 
 
+def _fmt_age(seconds: float) -> str:
+    s = int(max(0, seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def cmd_presence(args: argparse.Namespace) -> None:
+    bus, room, identity = _resolve_config(args)
+    t = GitBusTransport(bus, room, identity)
+    if args.once:
+        t.announce_presence()
+        print(f"presence announced: {identity}")
+        return
+    if args.beat:
+        print(f"presence heartbeat every {args.interval:g}s for {identity} "
+              f"(Ctrl-C to stop)", file=sys.stderr)
+        try:
+            while True:
+                t.announce_presence()
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("stopped", file=sys.stderr)
+        return
+    rows = t.read_presence()
+    if not rows:
+        print("no presence records")
+        return
+    for r in rows:
+        status = "online" if r["age"] <= args.window else "stale "
+        print(f"{status}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago")
+
+
 def cmd_guide(args: argparse.Namespace) -> None:
     # No config needed — a cold agent can run this with nothing set up.
     print(GUIDE_TEXT)
@@ -447,6 +490,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="number of recent messages to keep in the active file (default 200)",
     )
     s_compact.set_defaults(func=cmd_compact)
+
+    s_pres = sub.add_parser(
+        "presence",
+        help="show who's online (or --beat to advertise yourself)",
+        description="Liveness via one overwritten JSON file per identity under "
+                    "<room>/presence/. Default: list who's present. --beat: heartbeat loop.",
+    )
+    s_pres.add_argument("--beat", action="store_true",
+                        help="run a heartbeat loop advertising this identity (Ctrl-C to stop)")
+    s_pres.add_argument("--once", action="store_true",
+                        help="emit a single presence heartbeat and exit")
+    s_pres.add_argument("--interval", type=float, default=120.0,
+                        help="heartbeat interval seconds with --beat (default 120)")
+    s_pres.add_argument("--window", type=float, default=300.0,
+                        help="seconds within which an identity counts as online (default 300)")
+    s_pres.set_defaults(func=cmd_presence)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")

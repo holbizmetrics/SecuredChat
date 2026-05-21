@@ -299,6 +299,36 @@ def test_bus_monitor(root: Path) -> None:
     check(own.id[:8] not in out, "monitor excludes my own messages by default")
 
 
+def test_presence(root: Path) -> None:
+    print("test_presence (liveness heartbeat)")
+    repo = make_bus(root, "bus_presence")
+    ta = GitBusTransport(repo, "relay", "alice")
+    tb = GitBusTransport(repo, "relay", "bob")
+    ta.announce_presence()
+    tb.announce_presence()
+
+    rows = ta.read_presence()
+    idents = {r["identity"] for r in rows}
+    check(idents == {"alice", "bob"}, "presence lists all announced identities")
+    check(all(r["age"] < 60 for r in rows), "fresh presence has small age")
+
+    # Re-announce alice → still exactly one alice record (overwrite, not append).
+    ta.announce_presence()
+    rows2 = ta.read_presence()
+    check(sum(1 for r in rows2 if r["identity"] == "alice") == 1,
+          "presence is one-file-per-identity (overwritten, not appended)")
+
+    # Presence must not pollute the chat log.
+    chat = repo / "relay" / "chat.jsonl"
+    check((not chat.exists()) or "presence" not in chat.read_text(encoding="utf-8"),
+          "presence does not pollute chat.jsonl")
+
+    # A presence file exists per identity under presence/.
+    pdir = repo / "relay" / "presence"
+    check(pdir.is_dir() and (pdir / "alice.json").exists() and (pdir / "bob.json").exists(),
+          "presence/<identity>.json files created")
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -320,6 +350,7 @@ def main() -> int:
         test_id_resolves_and_dedup(root)
         test_watch_reanchor(root)
         test_bus_monitor(root)
+        test_presence(root)
     finally:
         _rm(root)
     print()

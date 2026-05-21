@@ -475,3 +475,72 @@ class GitBusTransport(Transport):
             if m:
                 amap.setdefault(m.group(1), author)  # first (newest) wins
         return amap
+
+    # ----- presence / liveness -------------------------------------------- #
+    # One small JSON file per identity under <room>/presence/, OVERWRITTEN each
+    # heartbeat (never appended) → the working tree never grows, and different
+    # identities never conflict (each writes only its own file). Kept out of
+    # chat.jsonl so presence chatter doesn't pollute the message log.
+
+    @property
+    def presence_dir(self) -> Path:
+        return self.chat_file.parent / "presence"
+
+    def announce_presence(self, meta: dict | None = None) -> None:
+        """Overwrite this identity's presence file with a fresh timestamp, then
+        commit + push. Conflict-free by construction (one writer per file)."""
+        with self._send_lock():
+            if self._has_remote():
+                self._pull_rebase()
+            self.presence_dir.mkdir(parents=True, exist_ok=True)
+            pfile = self.presence_dir / f"{re.sub(r'[^A-Za-z0-9._-]', '_', self.identity)}.json"
+            payload = {"identity": self.identity, "ts": time.time(), "kind": "presence"}
+            if meta:
+                payload.update(meta)
+            pfile.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            add = self._git("add", str(pfile.relative_to(self.bus_repo)), check=False)
+            if add.returncode != 0:
+                raise RuntimeError(f"git add failed: {add.stderr.strip()}")
+            commit = self._git(
+                "-c", f"user.email={self.identity}@securedchat-cli",
+                "-c", f"user.name={self.identity}",
+                "commit", "-m", f"presence: {self.room} {self.identity}",
+                check=False,
+            )
+            if commit.returncode != 0:
+                blob = (commit.stdout + commit.stderr).lower()
+                if "nothing to commit" in blob:
+                    return  # unchanged within the same instant — benign
+                raise RuntimeError(
+                    f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"
+                )
+            if self._has_remote():
+                result = None
+                for _ in range(3):
+                    result = self._git("push", check=False)
+                    if result.returncode == 0:
+                        return
+                    self._pull_rebase()
+                raise RuntimeError(f"presence push failed after retries: {result.stderr if result else ''}")
+
+    def read_presence(self, pull: bool = True) -> list[dict]:
+        """Return [{identity, ts, age}] for every presence file, newest first.
+        `age` is seconds since that identity's last heartbeat. Callers apply
+        their own online/stale window. Pass pull=False to skip the git pull when
+        the caller already refreshed (e.g. the dashboard right after recv)."""
+        if pull and self._has_remote():
+            with self._send_lock():
+                self._pull_rebase()
+        if not self.presence_dir.is_dir():
+            return []
+        now = time.time()
+        rows: list[dict] = []
+        for pf in self.presence_dir.glob("*.json"):
+            try:
+                d = json.loads(pf.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            ts = float(d.get("ts") or 0.0)
+            rows.append({"identity": d.get("identity") or pf.stem, "ts": ts, "age": now - ts})
+        rows.sort(key=lambda r: r["ts"], reverse=True)
+        return rows
