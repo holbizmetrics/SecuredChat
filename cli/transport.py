@@ -38,6 +38,11 @@ from typing import Iterator
 # code repo). `init` creates it; the transport warns if it is missing.
 BUS_MARKER = ".securedchat-bus"
 
+# Identity/room must be safe for git author/subject AND filenames — reject
+# anything that could inject into `git -c user.name=...`, a commit subject, or a
+# path (newline, '=', '/', '..', control chars).
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 @dataclass
 class Message:
@@ -115,9 +120,14 @@ class GitBusTransport(Transport):
     """
 
     def __init__(self, bus_repo: Path, room: str, identity: str):
+        if not _SAFE_NAME.match(room or ""):
+            raise RuntimeError(f"invalid room {room!r}: use only letters, digits, . _ -")
+        if not _SAFE_NAME.match(identity or ""):
+            raise RuntimeError(f"invalid identity {identity!r}: use only letters, digits, . _ -")
         self.bus_repo = Path(bus_repo).resolve()
         self.room = room
         self.identity = identity
+        self.last_pull_ok = True  # set False by _pull_rebase on a failed pull (R2)
         self.chat_file = self.bus_repo / room / "chat.jsonl"
         # Compaction moves old messages here as chat-<seq>.jsonl segments; the
         # active chat.jsonl keeps only the recent tail. _read_all stitches
@@ -176,6 +186,7 @@ class GitBusTransport(Transport):
         current (the false "0 pending" failure). Returns True on success."""
         res = self._git("pull", "--rebase", "--autostash", check=False)
         if res.returncode == 0:
+            self.last_pull_ok = True
             return True
         git_dir = self.bus_repo / ".git"
         if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
@@ -186,6 +197,7 @@ class GitBusTransport(Transport):
             "local state may be stale (offline or merge conflict).",
             file=sys.stderr,
         )
+        self.last_pull_ok = False
         return False
 
     def _id_resolves(self, since_id: str) -> bool:
@@ -459,9 +471,13 @@ class GitBusTransport(Transport):
         cross-check a message's claimed `from` against who actually committed it.
 
         Messages not committed via the CLI, or whose subject doesn't match, simply
-        don't appear → callers treat them as UNVERIFIABLE, never as spoofed. The
-        git author is authoritative because `send` sets it (-c user.name=identity)
-        and rebase preserves it across cross-machine merges.
+        don't appear → callers treat them as UNVERIFIABLE, never as spoofed.
+
+        IMPORTANT — this is NOT authentication. `send` sets the git author from the
+        --identity flag (`-c user.name=identity`), so the author reflects who
+        *committed* the line, not a verified identity; anyone with write access to
+        the bus repo can set any author. This catches accidental/sloppy mislabeling,
+        not a determined forger. Real per-sender auth needs signed bodies (roadmap).
         """
         sep = "\x1f"
         out = self._git("log", f"--format=%an{sep}%s", check=False)

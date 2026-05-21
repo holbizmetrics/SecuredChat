@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         "act within your standing permissions and gates; for anything needing fresh\n"
         "approval, do the allowed part then escalate over the bus (chat.py send --to <them>)\n"
         "and wait, rather than auto-running it.\n"
+        "Trust: 'from' is self-asserted, NOT authenticated (trust = who can write the\n"
+        "bus repo). --verify-from flags sloppy mislabels, not a determined writer.\n"
     )
     return 0
 

@@ -67,7 +67,7 @@ def send(t: GitBusTransport, from_: str, body: str, to: str | None = None) -> Me
 
 # --------------------------------------------------------------------------- #
 def test_cursor_scoping(root: Path) -> None:
-    print("test_cursor_scoping")
+    print("test_cursor_scoping (R1: scoped only, no blanket legacy inheritance)")
     cfg = root / "cfghome" / ".config" / "securedchat"
     # Redirect chat.py's cursor globals at module level (used by the helpers).
     chat.CONFIG_DIR = cfg
@@ -75,31 +75,54 @@ def test_cursor_scoping(root: Path) -> None:
     chat.CURSOR_DIR = cfg / "cursors"
 
     # No cursor anywhere yet.
-    check(chat._read_last_seen("windows-claude", "relay") is None, "absent cursor -> None")
+    check(chat._read_last_seen("windows-claude", "relay") is None, "absent scoped cursor -> None")
 
-    # Legacy global seeds the read when no scoped file exists (backward-compat).
+    # R1: a legacy global cursor is NOT blanket-inherited by _read_last_seen.
     chat.LEGACY_LAST_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     chat.LEGACY_LAST_SEEN_FILE.write_text("legacy-id\n")
-    check(chat._read_last_seen("windows-claude", "relay") == "legacy-id",
-          "legacy global used as fallback")
+    check(chat._read_last_seen("windows-claude", "relay") is None,
+          "scoped read does NOT inherit the legacy global (R1 fix)")
 
-    # Writing the scoped cursor takes precedence over legacy.
+    # Scoped cursor reads back; different identities/rooms are independent.
     chat._write_last_seen("windows-claude", "relay", "scoped-A")
-    check(chat._read_last_seen("windows-claude", "relay") == "scoped-A",
-          "scoped cursor wins over legacy")
-
-    # A different identity/room is independent — the core no-clobber property.
+    check(chat._read_last_seen("windows-claude", "relay") == "scoped-A", "scoped cursor read back")
     chat._write_last_seen("phone-claude", "relay", "scoped-B")
     check(chat._read_last_seen("windows-claude", "relay") == "scoped-A",
           "windows cursor unaffected by phone mark-seen (no clobber)")
-    check(chat._read_last_seen("phone-claude", "relay") == "scoped-B",
-          "phone cursor independent")
-    check(chat._read_last_seen("windows-claude", "other-room") == "legacy-id",
-          "different room -> own cursor (falls back to legacy here)")
+    check(chat._read_last_seen("phone-claude", "relay") == "scoped-B", "phone cursor independent")
+    check(chat._read_last_seen("windows-claude", "other-room") is None,
+          "new room -> None, NOT a stranger's legacy cursor (R1 fix)")
 
     # Sanitization keeps exotic names inside CURSOR_DIR.
     p = chat._cursor_file("a/b..c", "r m")
     check(chat.CURSOR_DIR in p.parents, "exotic identity/room stays under CURSOR_DIR")
+
+
+def test_resolve_since_migration(root: Path) -> None:
+    print("test_resolve_since_migration (R1: resolve-checked legacy adoption)")
+    cfg = root / "cfghome2" / ".config" / "securedchat"
+    chat.CONFIG_DIR = cfg
+    chat.LEGACY_LAST_SEEN_FILE = cfg / "last-seen-id"
+    chat.CURSOR_DIR = cfg / "cursors"
+
+    repo = make_bus(root, "bus_migrate")
+    t = GitBusTransport(repo, "relay", "alice")
+    msgs = [send(t, "alice", f"m{i}") for i in range(3)]
+
+    # No scoped cursor, no legacy -> None (full history).
+    check(chat._resolve_since(t, "alice", "relay") is None, "no cursor + no legacy -> None")
+
+    # A legacy id that does NOT resolve in this room is NOT inherited (R1).
+    chat.LEGACY_LAST_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    chat.LEGACY_LAST_SEEN_FILE.write_text("0" * 36 + "\n")
+    check(chat._resolve_since(t, "alice", "relay") is None,
+          "unresolvable legacy id is NOT inherited")
+
+    # A legacy id that DOES resolve here is adopted + persisted scoped (migration).
+    chat.LEGACY_LAST_SEEN_FILE.write_text(msgs[0].id + "\n")
+    check(chat._resolve_since(t, "alice", "relay") == msgs[0].id, "resolvable legacy id adopted")
+    check(chat._read_last_seen("alice", "relay") == msgs[0].id,
+          "adopted legacy persisted as scoped cursor")
 
 
 def test_recv_since_and_fastpath(root: Path) -> None:
@@ -329,6 +352,24 @@ def test_presence(root: Path) -> None:
           "presence/<identity>.json files created")
 
 
+def test_identity_validation(root: Path) -> None:
+    print("test_identity_validation (R4: reject metachars in identity/room)")
+    repo = make_bus(root, "bus_valid")
+    ok = GitBusTransport(repo, "relay", "windows-claude")
+    check(ok.identity == "windows-claude", "valid identity accepted")
+    for bad in ["bad room", "a\nb", "x=y", "../escape", ""]:
+        try:
+            GitBusTransport(repo, "relay", bad)
+            check(False, f"invalid identity {bad!r} should be rejected")
+        except RuntimeError:
+            check(True, f"invalid identity {bad!r} rejected")
+    try:
+        GitBusTransport(repo, "bad room", "alice")
+        check(False, "invalid room should be rejected")
+    except RuntimeError:
+        check(True, "invalid room rejected")
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -343,6 +384,7 @@ def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
     try:
         test_cursor_scoping(root)
+        test_resolve_since_migration(root)
         test_recv_since_and_fastpath(root)
         test_compact_roundtrip(root)
         test_from_verification(root)
@@ -351,6 +393,7 @@ def main() -> int:
         test_watch_reanchor(root)
         test_bus_monitor(root)
         test_presence(root)
+        test_identity_validation(root)
     finally:
         _rm(root)
     print()

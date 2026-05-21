@@ -110,6 +110,10 @@ REACT ON YOUR OWN (background monitor, for an unattended session)
   report back (send --to <them>) and wait for the operator (maybe on another
   device) to approve by replying. step (surface+wait) <-> act-within-perms &
   escalate-on-bus <-> skip-all (never).
+  TRUST: 'from' is self-asserted, NOT authenticated — the trust boundary is who
+  can write to the bus repo. --verify-from flags sloppy mislabels, not a
+  determined writer (who can set any git author). Real per-sender auth = signed
+  bodies (roadmap). Keep your bus repo private + collaborators trusted.
 
 WHO'S ONLINE (presence / liveness)
   chat.py presence              # list identities + how long since each was seen
@@ -142,23 +146,43 @@ def _cursor_file(identity: str, room: str) -> Path:
 
 
 def _read_last_seen(identity: str, room: str) -> str | None:
+    """The SCOPED cursor for (identity, room) only. No legacy fallback here — see
+    _resolve_since for the resolve-checked one-time migration (R1)."""
     try:
         v = _cursor_file(identity, room).read_text().strip()
         return v or None
     except FileNotFoundError:
-        # Backward-compat: seed from the legacy global cursor once. The next
-        # mark-seen writes the scoped file and the legacy one is never read again.
-        try:
-            v = LEGACY_LAST_SEEN_FILE.read_text().strip()
-            return v or None
-        except FileNotFoundError:
-            return None
+        return None
 
 
 def _write_last_seen(identity: str, room: str, msg_id: str) -> None:
     f = _cursor_file(identity, room)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(msg_id + "\n")
+
+
+def _resolve_since(t: "GitBusTransport", identity: str, room: str) -> str | None:
+    """Cursor for recv/watch when --since is not given. The scoped cursor wins.
+
+    If there's no scoped cursor, adopt the LEGACY global cursor ONLY if it actually
+    resolves in THIS room's log (and persist it scoped to finish the one-time
+    migration). A legacy id that doesn't resolve here belongs to a *different*
+    bus/room — never inherit it blindly: doing so silently skipped backlog or
+    showed a false "0 pending" (R1). No scoped cursor and no resolvable legacy
+    → None = full history (summary-bounded). Fail toward showing too much, never
+    toward a silent miss.
+    """
+    scoped = _read_last_seen(identity, room)
+    if scoped is not None:
+        return scoped
+    try:
+        legacy = LEGACY_LAST_SEEN_FILE.read_text().strip() or None
+    except FileNotFoundError:
+        legacy = None
+    if legacy and t._id_resolves(legacy):
+        _write_last_seen(identity, room, legacy)  # complete the migration, scoped
+        return legacy
+    return None
 
 
 def _verify_from(t: "GitBusTransport", msgs: list, *, strict: bool) -> list:
@@ -276,13 +300,20 @@ def cmd_recv(args: argparse.Namespace) -> None:
         print(prefix)
         print(m.body)
         return
-    since = args.since if args.since is not None else _read_last_seen(identity, room)
+    since = args.since if args.since is not None else _resolve_since(t, identity, room)
     msgs = t.recv(since_id=since)
+    if not t.last_pull_ok:
+        # R2: surface staleness on the SAME stream as the result (stdout for
+        # human/monitor output; stderr under --json to keep the stream parseable)
+        # so a "0 pending" can never silently mean "offline".
+        print("securedchat: STALE — pull failed (offline/conflict); results are "
+              "local-only and may be incomplete.",
+              file=(sys.stderr if args.json else sys.stdout))
     if args.addressed_to_me:
         msgs = [m for m in msgs if m.to in (None, identity)]
     if args.exclude_self:
         msgs = [m for m in msgs if m.from_ != identity]
-    if args.verify_from:
+    if args.verify_from != "off":
         msgs = _verify_from(t, msgs, strict=(args.verify_from == "strict"))
     if args.summary:
         print(f"{len(msgs)} pending")
@@ -323,7 +354,7 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
 def cmd_watch(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
-    since = args.since if args.since is not None else _read_last_seen(identity, room)
+    since = args.since if args.since is not None else _resolve_since(t, identity, room)
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
             if args.addressed_to_me and m.to not in (None, identity):
@@ -464,11 +495,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
     s_recv.add_argument(
         "--verify-from",
-        choices=["warn", "strict"],
+        choices=["off", "warn", "strict"],
+        default="warn",
         help="cross-check each message's 'from' against the git commit author. "
-             "warn = flag mismatches on stderr but keep them; strict = drop spoofed "
-             "(mismatched) messages. Ids not committed via the CLI are unverifiable "
-             "and always kept. Recommended (strict) for any mode:auto consumer.",
+             "warn (default) = flag mismatches on stderr, keep them; strict = drop "
+             "mismatched; off = skip (saves a git log per recv). NOTE: this catches "
+             "accidental/sloppy mislabeling, NOT a determined forger — anyone with "
+             "write access to the bus can set any git author. It is not authentication.",
     )
     s_recv.set_defaults(func=cmd_recv)
 

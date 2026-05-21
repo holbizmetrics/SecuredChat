@@ -260,8 +260,16 @@ same room from a browser for oversight.
   so the prior data-loss / wedged-repo failure on a rebase conflict is
   gone. Cursors are scoped per (identity, room); failed pulls are surfaced
   loudly (no silent "0 pending" off stale local state); `recv` holds the
-  repo lock around its pull+read. Covered by `cli/test_chat.py` (37 checks
+  repo lock around its pull+read. Covered by `cli/test_chat.py` (full suite
   + a two-clone concurrent-append integration test).
+- **Identity is self-asserted, not authenticated.** `--identity` sets the git
+  author, so a message's `from` reflects who *committed* the line, not a verified
+  sender — anyone with write access to your bus repo can set any author. The
+  trust boundary is **who can push to the bus**. `recv --verify-from` (default
+  `warn`) flags accidental/sloppy mislabeling, **not** a determined forger. Keep
+  the bus repo private and its collaborators trusted; never treat a message as
+  trustworthy just because of its `from`. Real per-sender auth = signed bodies
+  (roadmap).
 - **No encryption layer yet on the CLI path.** The git bus inherits
   whatever transport security the remote provides (HTTPS to GitHub is
   encrypted; the file content is not end-to-end encrypted between
