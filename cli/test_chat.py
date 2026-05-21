@@ -269,6 +269,36 @@ def test_watch_reanchor(root: Path) -> None:
     th.join(timeout=1)
 
 
+def test_bus_monitor(root: Path) -> None:
+    print("test_bus_monitor (Claude-session background watcher)")
+    repo = make_bus(root, "bus_mon")
+    t = GitBusTransport(repo, "relay", "alice")
+    send(t, "alice", "before-monitor", to="bob")  # baseline: must NOT be replayed
+
+    proc = subprocess.Popen(
+        [sys.executable, str(HERE / "bus_monitor.py"),
+         "--bus", str(repo), "--room", "relay", "--identity", "bob", "--poll", "0.2"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        time.sleep(1.2)                      # start + anchor to head + MONITOR_READY
+        new = send(t, "alice", "hello-bob", to="bob")
+        own = send(t, "bob", "my own echo")  # from self -> must be filtered out
+        time.sleep(1.5)                      # let it poll (0.2s) and emit
+    finally:
+        proc.terminate()
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+
+    check("MONITOR_READY" in out, "monitor emits MONITOR_READY at startup")
+    check(new.id[:8] in out and "BUS_MSG" in out, "monitor emits BUS_MSG for a new addressed message")
+    check("before-monitor" not in out, "monitor anchors to head (no backlog replay)")
+    check(own.id[:8] not in out, "monitor excludes my own messages by default")
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -289,6 +319,7 @@ def main() -> int:
         test_gitattributes(root)
         test_id_resolves_and_dedup(root)
         test_watch_reanchor(root)
+        test_bus_monitor(root)
     finally:
         _rm(root)
     print()
