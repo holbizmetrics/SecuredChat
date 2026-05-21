@@ -428,9 +428,12 @@ class GitBusTransport(Transport):
             keep = [] if keep_last == 0 else active[-keep_last:]
 
             self.archive_dir.mkdir(parents=True, exist_ok=True)
-            # Time-prefixed, zero-padded name → lexicographic == chronological,
-            # so later segments (newer messages) sort after earlier ones.
-            seg_path = self.archive_dir / f"chat-{int(time.time()):012d}-{uuid.uuid4().hex[:8]}.jsonl"
+            # Nanosecond, zero-padded name → lexicographic == chronological even
+            # for two compactions within the SAME second. Whole-second names
+            # collided, leaving the random uuid suffix to decide segment order —
+            # an intermittent stitch-back mis-ordering bug. Later segments
+            # (newer messages) now reliably sort after earlier ones.
+            seg_path = self.archive_dir / f"chat-{time.time_ns():020d}-{uuid.uuid4().hex[:8]}.jsonl"
             with seg_path.open("w", encoding="utf-8") as f:
                 for m in to_archive:
                     f.write(m.to_jsonl() + "\n")
