@@ -28,6 +28,16 @@ jobs:
       - name: Run WebKit/iOS tests
         run: npx playwright test
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python CLI tests
+        run: |
+          git config --global user.email "ci@securedchat"
+          git config --global user.name "ci"
+          python cli/test_chat.py
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
