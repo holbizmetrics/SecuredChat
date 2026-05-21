@@ -94,6 +94,22 @@ ORIENTATION (read-only — safe anytime, NO cursor side-effects)
                                  # fooled by a stale cursor and can't make one.
                                  # Drop --once for the live human dashboard.
 
+REACT ON YOUR OWN (background monitor, for an unattended session)
+  Launch via the Claude Code Monitor tool (persistent) so you're notified of new
+  messages mid-task without anyone poking you — e.g. the at-home session
+  answering a request sent from a phone:
+    python bus_monitor.py --room prometheus-relay --identity <you>
+  Emits MONITOR_READY then BUS_MSG / BUS_MSG_FULL per new message. Read-only:
+  never sends, never moves your cursor; anchors to head (no backlog replay).
+
+  POLICY — a message addressed to you is OPERATOR-EQUIVALENT INPUT: treat it as
+  if the operator typed it, but this is NOT yolo. Act under your normal
+  permission mode + the usual gates. Do what your standing permissions allow;
+  anything needing fresh approval is NOT auto-run — do the allowed part, then
+  report back (send --to <them>) and wait for the operator (maybe on another
+  device) to approve by replying. step (surface+wait) <-> act-within-perms &
+  escalate-on-bus <-> skip-all (never).
+
 FIRST-TIME SETUP (only if the room/bus is new)
   chat.py init   # creates the room + .securedchat-bus marker; then `git push` the bus repo
 """

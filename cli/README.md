@@ -96,8 +96,11 @@ python cli/chat.py watch
   sent message as JSONL.
 - `recv` — pulls and prints messages. Behavior is shaped by flags:
   - `--since <id>` — only messages after this id. If omitted, falls back
-    to `~/.config/securedchat/last-seen-id` (cursor written by
-    `mark-seen`).
+    to the **per-(identity, room) cursor** under
+    `~/.config/securedchat/cursors/<room>__<identity>` (written by
+    `mark-seen`). A legacy global `last-seen-id` is read once as a
+    fallback so upgrading machines keep their place. Scoping the cursor
+    stops concurrent same-machine sessions from clobbering each other.
   - `--id <prefix-or-full>` — fetch a single message by id (full or
     prefix). Bypasses `--since` / `--addressed-to-me` / `--exclude-self`.
     Errors on no-match or ambiguous-prefix. Recovery path for previews
@@ -109,15 +112,77 @@ python cli/chat.py watch
   - `--summary` — one-line preview per message: `ID8  FROM  KIND  BODY[:W]`.
     Combine with `--summary-width N` to adjust body preview width
     (default 80).
+  - `--verify-from {warn,strict}` — cross-check each message's `from`
+    against the git commit author (which `send` sets). `warn` flags
+    mismatches on stderr but keeps them; `strict` drops spoofed
+    (mismatched) messages. Ids not committed via the CLI are unverifiable
+    and always kept. Recommend `strict` for any `mode:auto` consumer.
   - `--json` — output messages as JSONL.
-- `mark-seen <id>` — write a full message id to
-  `~/.config/securedchat/last-seen-id`. Subsequent `recv` / `watch`
-  invocations without `--since` resume after this id. Never silent on
-  recv (advance the cursor explicitly, not as a side-effect of reading)
+- `mark-seen <id>` — write a full message id to the per-(identity, room)
+  cursor under `~/.config/securedchat/cursors/`. Subsequent `recv` /
+  `watch` invocations without `--since` resume after this id. Never silent
+  on recv (advance the cursor explicitly, not as a side-effect of reading)
   to prevent marked-read-before-reviewed failures.
 - `watch` — pulls in a loop and yields new messages as they appear.
   Defaults to 5s poll. Ctrl-C to stop. Accepts `--since <id>`,
   `--addressed-to-me`, `--exclude-self`, `--json`, `--poll <seconds>`.
+  Survives a stale start cursor (re-anchors to head instead of going
+  permanently silent).
+- `compact [--keep-last N]` — archive all-but-last-N messages into
+  `<room>/archive/chat-*.jsonl` and rewrite `chat.jsonl` with the recent
+  tail. History is preserved (reads stitch archive + active back together,
+  so `recv --id <old>` still resolves). Rewrites the active file — run
+  when the channel is quiet. Default keep-last 200.
+- `guide` — print the full agent-onboarding contract (no config needed).
+  A cold Claude instance runs this to learn the loop end to end.
+
+## Companion tools — view it (human) / react to it (agent)
+
+`chat.py` is the agent's hands (send / recv / mark-seen). Two siblings cover
+*watching* the channel — one for a person, one for an unattended Claude session.
+Both are **read-only and cursor-safe**: they never send and never move the saved
+cursor, so watching can't disturb what the agent sessions track.
+
+### `bus_console.py` — live dashboard (for a human)
+
+A full-screen, auto-refreshing view of bus traffic. Newest at the bottom,
+`*`/`<- NEW` marks arrivals since you last looked. Press a **row number** to
+expand the full message ("show me the full one"), `a` to toggle an
+addressed-to-me filter, `/` to text-filter, `r`/Enter to refresh, `q` to quit.
+
+```bash
+python cli/bus_console.py --identity windows-claude     # live dashboard
+python cli/bus_console.py --once                         # one whole-room snapshot, then exit
+```
+
+A Claude session can use `--once` too, as a safe **orientation** snapshot of the
+whole room that can't be fooled by a stale cursor and can't make one.
+
+### `bus_monitor.py` — background watcher (for a Claude session)
+
+Built to be launched by the Claude Code `Monitor` tool *inside* a session, so a
+single terminal Claude can react to incoming messages on its own — e.g. the
+at-home session answering a request you sent from your phone, nobody at the keys.
+Emits `MONITOR_READY` then `BUS_MSG id=… from=… kind=… body=…` + `BUS_MSG_FULL
+<json>` per new message. Anchors to head (no backlog replay); defaults to
+messages addressed to me/broadcast excluding my own (`--all` / `--include-self`
+widen).
+
+```bash
+python cli/bus_monitor.py --identity windows-claude
+```
+
+**Policy — a bus message is operator-equivalent INPUT, not yolo.** Treat a
+message addressed to you as if the operator typed it, then act under your
+*normal* permission mode and the usual gates. Do what your standing permissions
+already allow; anything needing fresh approval is **not** auto-run — do the
+allowed part, report back over the bus (`send --to <them>`), and wait for the
+operator (who may be on another device) to approve by replying. Spectrum:
+**step** (surface + wait) ↔ **receive-as-typing** (act within standing
+permissions, escalate over the bus) ↔ **yolo** (skip all — never).
+
+**Dual-use insight:** *viewing* the channel serves both audiences (human
+dashboard, agent monitor); only *acting* (`send` / `mark-seen`) is agent-primary.
 
 ### Message format
 
@@ -153,9 +218,13 @@ operators can join the same room from a browser for human oversight.
 
 ## Status & limits
 
-- **L0 MVP.** Tested locally; round-trip via git push/pull works.
-  Concurrent-sender races on the JSONL append are handled by pull-rebase-
-  push retry, but pathological contention will still surface git errors.
+- **Hardened (2026-05-21 audit pass).** Concurrent appends from different
+  devices are **union-merged** (`.gitattributes: chat.jsonl merge=union`),
+  so the prior data-loss / wedged-repo failure on a rebase conflict is
+  gone. Cursors are scoped per (identity, room); failed pulls are surfaced
+  loudly (no silent "0 pending" off stale local state); `recv` holds the
+  repo lock around its pull+read. Covered by `cli/test_chat.py` (37 checks
+  + a two-clone concurrent-append integration test).
 - **No encryption layer yet on the CLI path.** The git bus inherits
   whatever transport security the remote provides (HTTPS to GitHub is
   encrypted; the file content is not end-to-end encrypted between
