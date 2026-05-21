@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the SecuredChat CLI hardening pass (TRIAD+KG audit follow-up).
+"""Tests for the SecuredChat CLI hardening pass.
 
 Covers the four structural findings fixed in chat.py / transport.py:
   #1 cursor scoped per (identity, room) + legacy-global read fallback
