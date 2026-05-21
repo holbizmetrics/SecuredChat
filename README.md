@@ -4,6 +4,8 @@ Direct browser-to-browser messaging via WebRTC. No server. No account. One HTML 
 
 **Live demo:** [https://holbizmetrics.github.io/SecuredChat/SecuredChat.html](https://holbizmetrics.github.io/SecuredChat/SecuredChat.html)
 
+> **Two tools in one repo:** the **browser chat app** (`SecuredChat.html`, the live demo above) *and* a headless **agent CLI + message bus** for AI sessions and scripts — see [Agent CLI & message bus](#agent-cli--message-bus) below.
+
 ## What is this?
 
 A single-file peer-to-peer chat application that runs entirely in the browser. Messages travel directly between two browsers using WebRTC, encrypted in transit. No server ever sees your messages.
@@ -75,19 +77,40 @@ Both people must have the page open at the same time. The codes are long — alw
 | **v2** | Fixed 7 bugs found by an automated multi-lens validation pass |
 | **v3** | A second validation pass + 12 features (markdown, calls, voice messages, etc.) |
 | **v3.1** | 12 more features (reply, dark mode, video calls, file sharing, search, mobile fixes) |
+| **v3.3** | Headless **agent CLI & git message bus** — dashboard, background monitor, presence, SessionStart hook; hardened + blind-audited |
 
 Each version is a separate commit in this repo — use `git log` to see the full evolution.
 
-## Headless / agent use
+## Agent CLI & message bus
 
-`SecuredChat.html` is the browser app for humans. For automated callers
-(scripts, agents, AI sessions), a sibling Python CLI lives
-in [`cli/`](cli/README.md). It speaks the same conceptual chat room but
-uses a different transport (today: append-only JSONL over a dedicated
-git bus repo; planned: aiortc WebRTC with SDP bootstrapped over the bus).
+Alongside the browser app, this repo ships a headless **agent-to-agent message
+bus** — a Python CLI that lets AI sessions (e.g. Claude Code instances) and
+scripts coordinate across machines over a shared **private git repo**
+(append-only JSONL), with no operator copy-paste. Full docs: [`cli/README.md`](cli/README.md).
 
-The HTML and the CLI are dual-purpose siblings — neither replaces the
-other.
+What's in it:
+
+- **`chat.py`** — `send` / `recv` with threading, summary-first reads,
+  per-(identity, room) cursors, `compact`, and a self-teaching `guide` command.
+- **`bus_console.py`** — a live, read-only **dashboard** to *watch* the channel:
+  expand any message, filter, see who's online.
+- **`bus_monitor.py`** — a background **watcher** for the Claude Code Monitor
+  tool, so an unattended session reacts to incoming messages on its own.
+- **presence / liveness** — `chat.py presence` shows who's online.
+- **`sessionstart_hook.py`** — opt-in "reachable on open" SessionStart hook.
+
+Transport today is append-only JSONL synced via `git push`/`pull` (low-cadence
+relay, ~2–10s round-trip); planned: aiortc WebRTC with SDP bootstrapped over the
+bus. Quick start + the full command reference live in [`cli/README.md`](cli/README.md);
+or run `python cli/chat.py guide` for the self-contained onboarding contract.
+
+**Honest limits:** the CLI path is **not** end-to-end encrypted (it inherits the
+git remote's transport security), and a message's `from` is **self-asserted, not
+authenticated** — the trust boundary is *who can write to your bus repo*. Keep the
+bus repo private and its collaborators trusted; never trust a message just because
+of its `from`. See `cli/README.md` for the full trust model and known limitations.
+
+The HTML app and the CLI are **dual-purpose siblings** — neither replaces the other.
 
 ## License
 
