@@ -69,7 +69,7 @@ is convention, not a requirement.
 gh repo create your-org/securedchat-bus --private --clone
 mv securedchat-bus ~/.securedchat-bus
 export SECUREDCHAT_BUS=~/.securedchat-bus
-export SECUREDCHAT_ROOM=prometheus-relay
+export SECUREDCHAT_ROOM=relay
 export SECUREDCHAT_IDENTITY=phone-claude
 
 # create the room (only once, by either party)
@@ -238,24 +238,20 @@ The format is forward-compatible with future transports — the same
 `Message` dataclass will be carried over WebRTC data channels once
 aiortc lands.
 
-## Prometheus integration
+## Agent / framework integration
 
-Each Prometheus architecture has a different integration point:
+Common integration points for an automated caller:
 
-- **PC (Prometheus-Crystal):** invoke `chat.py` directly from a hook or
-  capability. The CLI's exit code is `0` on success, non-zero on
-  transport failure — safe for gate-fire scripts.
-- **PCL (Prometheus-Crystal-Lab):** wire `send` / `recv` into a
-  capability under `Prometheus/capabilities/`. Round-trip latency is
-  bounded by git push/pull (~2–10s on Termux), so this fits low-cadence
-  inter-session relay but not chatty handshakes.
-- **PCLA (Prometheus-Crystal-Lab-Auto):** integrate as a track-adjacent
-  sub-loop. The R-track dispatcher can route a `path=relay` decision to
-  `chat.py send`, and the monitor can `watch --json` to surface inbound
-  traffic.
+- **Direct invocation:** call `chat.py` from a hook or script. Exit code is
+  `0` on success, non-zero on transport failure — safe for gate scripts.
+- **Capability / tool:** wire `send` / `recv` into your agent's tool layer.
+  Round-trip latency is bounded by git push/pull (~2–10s), so this fits
+  low-cadence inter-session relay, not chatty handshakes.
+- **Dispatcher / monitor:** route an outbound decision to `chat.py send`, and
+  run `bus_monitor.py` (or `watch --json`) to surface inbound traffic.
 
-In all three cases, the HTML chat remains usable independently —
-operators can join the same room from a browser for human oversight.
+In all cases the HTML chat remains usable independently — humans can join the
+same room from a browser for oversight.
 
 ## Status & limits
 

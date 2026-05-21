@@ -39,13 +39,13 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="securedchat-sessionstart-hook")
     p.add_argument("--identity", help="this session's identity (env: SECUREDCHAT_IDENTITY)")
-    p.add_argument("--room", help="room (env: SECUREDCHAT_ROOM; default prometheus-relay)")
+    p.add_argument("--room", help="room (env: SECUREDCHAT_ROOM; default relay)")
     p.add_argument("--heartbeat", type=float, default=0.0,
                    help="if >0, also advertise presence every N seconds via the monitor")
     args = p.parse_args(argv)
 
     identity = args.identity or os.environ.get("SECUREDCHAT_IDENTITY") or "<platform>-claude"
-    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "prometheus-relay"
+    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "relay"
     cli = Path(__file__).resolve().parent
     chat = cli / "chat.py"
     monitor = cli / "bus_monitor.py"

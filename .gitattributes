@@ -1,0 +1,7 @@
+# Distribution exclusions. `git archive` (the release-zip pipeline) omits files
+# marked export-ignore. The repo stays PRIVATE; these are internal artifacts that
+# must never ship in a public snapshot. Keeping them here (rather than deleting)
+# preserves them internally while guaranteeing they're absent from any release zip.
+cli/AUDIT-TRIAD-KG-2026-05-21.md export-ignore
+.github/ export-ignore
+.gitattributes export-ignore

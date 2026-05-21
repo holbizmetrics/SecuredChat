@@ -72,8 +72,8 @@ Both people must have the page open at the same time. The codes are long — alw
 | Version | What changed |
 |---------|-------------|
 | **v1** | Basic WebRTC chat — functional but buggy |
-| **v2** | Fixed 7 bugs found by [Prometheus](https://github.com/holbizmetrics/Prometheus) TRIAD validation |
-| **v3** | TRIAD Experimental validation + 12 features (markdown, calls, voice messages, etc.) |
+| **v2** | Fixed 7 bugs found by an automated multi-lens validation pass |
+| **v3** | A second validation pass + 12 features (markdown, calls, voice messages, etc.) |
 | **v3.1** | 12 more features (reply, dark mode, video calls, file sharing, search, mobile fixes) |
 
 Each version is a separate commit in this repo — use `git log` to see the full evolution.
@@ -81,7 +81,7 @@ Each version is a separate commit in this repo — use `git log` to see the full
 ## Headless / agent use
 
 `SecuredChat.html` is the browser app for humans. For automated callers
-(scripts, agents, Prometheus architectures), a sibling Python CLI lives
+(scripts, agents, AI sessions), a sibling Python CLI lives
 in [`cli/`](cli/README.md). It speaks the same conceptual chat room but
 uses a different transport (today: append-only JSONL over a dedicated
 git bus repo; planned: aiortc WebRTC with SDP bootstrapped over the bus).

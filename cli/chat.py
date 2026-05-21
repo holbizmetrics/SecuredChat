@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SecuredChat CLI — headless adapter for Prometheus architectures.
+"""SecuredChat CLI — headless adapter for AI agents (e.g. Claude Code sessions).
 
 Subcommands:
   init     Initialize a chat room (creates room dir + chat.jsonl in the bus repo)
@@ -55,7 +55,7 @@ copy-paste. Everything you need is below; no other doc is required.
 
 CONFIG (env wins; or pass --bus/--room/--identity on every call)
   SECUREDCHAT_BUS       path to the bus git repo (a DEDICATED repo, never a code repo)
-  SECUREDCHAT_ROOM      room name (e.g. prometheus-relay)
+  SECUREDCHAT_ROOM      room name (e.g. relay)
   SECUREDCHAT_IDENTITY  who you are (e.g. windows-claude)
 
 THE LOOP (in order)
@@ -99,7 +99,7 @@ REACT ON YOUR OWN (background monitor, for an unattended session)
   Launch via the Claude Code Monitor tool (persistent) so you're notified of new
   messages mid-task without anyone poking you — e.g. the at-home session
   answering a request sent from a phone:
-    python bus_monitor.py --room prometheus-relay --identity <you>
+    python bus_monitor.py --room relay --identity <you>
   Emits MONITOR_READY then BUS_MSG / BUS_MSG_FULL per new message. Read-only:
   never sends, never moves your cursor; anchors to head (no backlog replay).
 
@@ -136,7 +136,7 @@ Run `chat.py guide` for the full agent-onboarding contract (no config needed).
 
 def _cursor_file(identity: str, room: str) -> Path:
     # Sanitize so an exotic identity/room can't escape CURSOR_DIR or collide on
-    # path separators. Simple slugs (windows-claude, prometheus-relay) pass through.
+    # path separators. Simple slugs (windows-claude, relay) pass through.
     safe = lambda s: re.sub(r"[^A-Za-z0-9._-]", "_", s)
     return CURSOR_DIR / f"{safe(room)}__{safe(identity)}"
 

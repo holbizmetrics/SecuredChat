@@ -1,10 +1,12 @@
 name: Release
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., v3.2.0)'
+        description: 'Release tag (e.g., v3.2.0)'
         required: true
         type: string
 
@@ -13,20 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
       - name: Install dependencies
         run: npm install
-
       - name: Install Playwright WebKit
         run: npx playwright install webkit --with-deps
-
       - name: Run unit tests
         run: node run_tests.js
-
       - name: Run WebKit/iOS tests
         run: npx playwright test
 
@@ -38,10 +35,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve tag
+        run: echo "TAG=${{ github.event.inputs.version || github.ref_name }}" >> "$GITHUB_ENV"
+
+      - name: Build clean distribution zip
+        # git archive = a snapshot (no .git / no history) and honours
+        # .gitattributes `export-ignore`, so internal files (the audit doc, CI,
+        # .gitattributes) never ship. The private repo keeps its full history;
+        # the published zip is clean.
+        run: git archive --format=zip -o "securedchat-${TAG}.zip" HEAD
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version }}
-          name: SecuredChat ${{ inputs.version }}
+          tag_name: ${{ env.TAG }}
+          name: SecuredChat ${{ env.TAG }}
           generate_release_notes: true
-          files: SecuredChat.html
+          files: |
+            securedchat-${{ env.TAG }}.zip
+            SecuredChat.html

@@ -13,8 +13,8 @@
     "url": "git+https://github.com/holbizmetrics/SecuredChat.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "holbizmetrics",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/holbizmetrics/SecuredChat/issues"
   },

@@ -23,7 +23,7 @@ Deliberate properties:
     operator, or act autonomously) is the session's policy, not the monitor's.
 
 Usage (via the Monitor tool, persistent):
-  python bus_monitor.py --bus PATH --room prometheus-relay --identity windows-claude
+  python bus_monitor.py --bus PATH --room relay --identity windows-claude
   # defaults: only messages addressed to me or broadcast, excluding my own.
   #   --all           also report messages addressed to other identities
   #   --include-self  also report my own sent messages
@@ -57,7 +57,7 @@ def force_utf8_io() -> None:
 
 def resolve(args: argparse.Namespace) -> tuple[Path, str, str]:
     bus = args.bus or os.environ.get("SECUREDCHAT_BUS")
-    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "prometheus-relay"
+    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "relay"
     identity = args.identity or os.environ.get("SECUREDCHAT_IDENTITY")
     if not bus:
         sys.exit("missing --bus (or set SECUREDCHAT_BUS)")
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Read-only background bus watcher for the Claude Code Monitor tool.",
     )
     p.add_argument("--bus", help="path to git bus repo (env: SECUREDCHAT_BUS)")
-    p.add_argument("--room", help="room name (env: SECUREDCHAT_ROOM; default prometheus-relay)")
+    p.add_argument("--room", help="room name (env: SECUREDCHAT_ROOM; default relay)")
     p.add_argument("--identity", help="my identity (env: SECUREDCHAT_IDENTITY)")
     p.add_argument("--poll", type=float, default=30.0, help="poll interval seconds (default 30)")
     p.add_argument("--all", action="store_true",

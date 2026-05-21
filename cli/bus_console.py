@@ -16,7 +16,7 @@ Deliberate properties:
 
 Usage:
   python bus_console.py                 # uses env config
-  python bus_console.py --bus PATH --room prometheus-relay --identity windows-claude
+  python bus_console.py --bus PATH --room relay --identity windows-claude
   python bus_console.py --me            # start filtered to messages addressed to me
   python bus_console.py --once          # render one frame and exit (non-interactive)
 
@@ -245,7 +245,7 @@ def show_help(kr: KeyReader) -> None:
 # --------------------------------------------------------------------------- #
 def resolve(args: argparse.Namespace) -> tuple[Path, str, str]:
     bus = args.bus or os.environ.get("SECUREDCHAT_BUS")
-    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "prometheus-relay"
+    room = args.room or os.environ.get("SECUREDCHAT_ROOM") or "relay"
     identity = args.identity or os.environ.get("SECUREDCHAT_IDENTITY") or "viewer"
     if not bus:
         sys.exit("missing --bus (or set SECUREDCHAT_BUS)")
@@ -258,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Live, read-only human dashboard for the SecuredChat git bus.",
     )
     p.add_argument("--bus", help="path to git bus repo (env: SECUREDCHAT_BUS)")
-    p.add_argument("--room", help="room name (env: SECUREDCHAT_ROOM; default prometheus-relay)")
+    p.add_argument("--room", help="room name (env: SECUREDCHAT_ROOM; default relay)")
     p.add_argument("--identity", help="your identity for the me-filter (env: SECUREDCHAT_IDENTITY)")
     p.add_argument("--poll", type=float, default=3.0, help="refresh interval seconds (default 3)")
     p.add_argument("--me", action="store_true", help="start filtered to messages addressed to me")
