@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -118,6 +119,10 @@ class GitBusTransport(Transport):
         self.room = room
         self.identity = identity
         self.chat_file = self.bus_repo / room / "chat.jsonl"
+        # Compaction moves old messages here as chat-<seq>.jsonl segments; the
+        # active chat.jsonl keeps only the recent tail. _read_all stitches
+        # archive segments + active back together so history is never lost.
+        self.archive_dir = self.chat_file.parent / "archive"
         if not (self.bus_repo / ".git").exists():
             raise RuntimeError(f"Not a git repo: {self.bus_repo}")
         if not (self.bus_repo / BUS_MARKER).exists():
@@ -141,12 +146,64 @@ class GitBusTransport(Transport):
     def _has_remote(self) -> bool:
         return bool(self._git("remote", check=False).stdout.strip())
 
+    def _ensure_gitattributes(self) -> bool:
+        """Ensure the bus repo declares a union-merge driver for the append-only
+        chat logs. Without it, two devices appending at EOF of chat.jsonl produce
+        an add/add conflict that halts `pull --rebase`; `check=False` swallows the
+        failure and the half-finished rebase wedges the repo for the next send.
+        `merge=union` keeps both sides' appended lines — no conflict, no loss.
+        Returns True if it wrote/updated the file (so the caller can stage it)."""
+        ga = self.bus_repo / ".gitattributes"
+        rules = ["chat.jsonl merge=union", "chat-*.jsonl merge=union"]
+        existing = ga.read_text(encoding="utf-8") if ga.exists() else ""
+        missing = [r for r in rules if r not in existing]
+        if not missing:
+            return False
+        prefix = ""
+        if not existing:
+            prefix = ("# SecuredChat bus — chat logs are append-only JSONL; union-merge\n"
+                      "# so concurrent appends from different devices never conflict.\n")
+        elif not existing.endswith("\n"):
+            prefix = "\n"
+        with ga.open("a", encoding="utf-8") as f:
+            f.write(prefix + "\n".join(missing) + "\n")
+        return True
+
+    def _pull_rebase(self) -> bool:
+        """`pull --rebase --autostash`, but DON'T discard the result. On failure,
+        abort any half-finished rebase so the repo isn't left wedged for the next
+        op, and warn loudly instead of silently serving stale local state as if
+        current (the false "0 pending" failure). Returns True on success."""
+        res = self._git("pull", "--rebase", "--autostash", check=False)
+        if res.returncode == 0:
+            return True
+        git_dir = self.bus_repo / ".git"
+        if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+            self._git("rebase", "--abort", check=False)  # unwedge for next op
+        msg = (res.stderr or res.stdout or "").strip().replace("\n", " ")
+        print(
+            f"securedchat: WARNING pull --rebase failed ({msg[:200]}); "
+            "local state may be stale (offline or merge conflict).",
+            file=sys.stderr,
+        )
+        return False
+
+    def _id_resolves(self, since_id: str) -> bool:
+        """True iff `since_id` uniquely matches a message currently in the log
+        (full history). Used by watch to tell a stale cursor (re-anchor) apart
+        from a valid cursor with simply no new messages (keep waiting)."""
+        matches = [m for m in self._read_all(include_archive=True) if m.id.startswith(since_id)]
+        return len(matches) == 1
+
     @contextmanager
     def _send_lock(self, timeout: float = 10.0):
-        """Best-effort advisory lock serializing concurrent sends on ONE machine.
+        """Best-effort advisory lock serializing repo-mutating git ops on ONE machine.
 
-        Cross-machine concurrency is still covered by push rebase-retry. If the
-        lock can't be acquired within `timeout` (e.g. a crashed holder left a
+        Held by `send` (pull + append + commit + push) AND by `recv` (its
+        `git pull --rebase --autostash` + file read). Without it, a same-machine
+        recv could pull/rebase while a send is mid-commit, or read a half-written
+        line. Cross-machine concurrency is still covered by push rebase-retry. If
+        the lock can't be acquired within `timeout` (e.g. a crashed holder left a
         stale lock), the stale lock is broken and we proceed rather than block.
         """
         lock_path = self.chat_file.parent / ".send.lock"
@@ -175,13 +232,16 @@ class GitBusTransport(Transport):
     def send(self, msg: Message) -> None:
         with self._send_lock():
             if self._has_remote():
-                self._git("pull", "--rebase", "--autostash", check=False)
+                self._pull_rebase()
+            ga_added = self._ensure_gitattributes()
             with self.chat_file.open("a", encoding="utf-8") as f:
                 f.write(msg.to_jsonl() + "\n")
             rel = self.chat_file.relative_to(self.bus_repo)
             add = self._git("add", str(rel), check=False)
             if add.returncode != 0:
                 raise RuntimeError(f"git add failed: {add.stderr.strip()}")
+            if ga_added:
+                self._git("add", ".gitattributes", check=False)
             commit = self._git(
                 "-c", f"user.email={self.identity}@securedchat-cli",
                 "-c", f"user.name={self.identity}",
@@ -199,14 +259,21 @@ class GitBusTransport(Transport):
                 result = self._git("push", check=False)
                 if result.returncode == 0:
                     return
-                self._git("pull", "--rebase", "--autostash", check=False)
+                self._pull_rebase()
             raise RuntimeError(f"push failed after retries: {result.stderr if result else ''}")
 
-    def _read_all(self) -> list[Message]:
-        if not self.chat_file.exists():
+    def _archive_segments(self) -> list[Path]:
+        """Archive segments in chronological order (lexicographic = chronological
+        because segment names are zero-padded / timestamped at compaction)."""
+        if not self.archive_dir.is_dir():
+            return []
+        return sorted(self.archive_dir.glob("chat-*.jsonl"))
+
+    def _read_file(self, path: Path) -> list[Message]:
+        if not path.exists():
             return []
         msgs: list[Message] = []
-        with self.chat_file.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -228,10 +295,51 @@ class GitBusTransport(Transport):
                 msgs.append(m)
         return msgs
 
+    def _read_all(self, include_archive: bool = True) -> list[Message]:
+        """Read messages in chronological order.
+
+        include_archive=True  → archive segments (oldest first) + active tail
+                                 = the full history (needed for full dumps,
+                                 `recv --id`, and resolving an old/archived cursor).
+        include_archive=False → active chat.jsonl only (the recent tail) — the
+                                 fast path for a recent cursor that resolves
+                                 within the active file.
+        """
+        msgs: list[Message] = []
+        if include_archive:
+            for seg in self._archive_segments():
+                msgs.extend(self._read_file(seg))
+        msgs.extend(self._read_file(self.chat_file))
+        # Dedup by id, keeping the first (oldest) copy. Guards against a line that
+        # ends up in BOTH an archive segment and the active file — e.g. a
+        # union-merge of a compaction (which removed lines) racing a concurrent
+        # append (which re-added them). recv must deliver each id at most once.
+        seen: set[str] = set()
+        deduped: list[Message] = []
+        for m in msgs:
+            if m.id in seen:
+                continue
+            seen.add(m.id)
+            deduped.append(m)
+        return deduped
+
     def recv(self, since_id: str | None = None) -> list[Message]:
-        if self._has_remote():
-            self._git("pull", "--rebase", "--autostash", check=False)
-        msgs = self._read_all()
+        with self._send_lock():
+            if self._has_remote():
+                self._pull_rebase()
+            # Fast path: a full-length cursor (mark-seen writes the full id) that
+            # lands in the active tail means everything after it is also in the
+            # active tail — skip reading archive segments. Short `--since`
+            # prefixes take the full-history path to preserve exact prefix /
+            # ambiguity semantics.
+            if since_id is not None and len(since_id) >= 32:
+                active = self._read_all(include_archive=False)
+                hits = [i for i, m in enumerate(active) if m.id.startswith(since_id)]
+                if len(hits) == 1:
+                    return active[hits[0] + 1:]
+                # 0 hits → cursor is archived or stale; >1 → ambiguous in active.
+                # Both fall through to full-history resolution below.
+            msgs = self._read_all(include_archive=True)
         if since_id is None:
             return msgs
         # Match by id prefix (consistent with `recv --id`). A stale/ambiguous
@@ -258,7 +366,8 @@ class GitBusTransport(Transport):
         seen: set[str] = set()
         seen_order: list[str] = []
         while True:
-            for m in self.recv(since_id=last_id):
+            batch = self.recv(since_id=last_id)
+            for m in batch:
                 if m.id in seen:
                     continue
                 seen.add(m.id)
@@ -267,4 +376,102 @@ class GitBusTransport(Transport):
                     seen.discard(seen_order.pop(0))
                 last_id = m.id
                 yield m
+            # A1: if a poll yielded nothing AND the cursor no longer resolves in
+            # the (freshly pulled) log, it is STALE — re-anchor to head and resume
+            # from new messages. Otherwise recv(since=stale) returns [] forever and
+            # the watcher is permanently dead, never emitting even brand-new
+            # messages. Distinct from "valid cursor, simply nothing new" (which
+            # resolves and must keep waiting, not re-anchor + replay).
+            if not batch and last_id is not None and not self._id_resolves(last_id):
+                head = self._read_all(include_archive=True)
+                new_anchor = head[-1].id if head else None
+                if new_anchor != last_id:
+                    print(
+                        "securedchat: watch cursor stale — re-anchored to head; "
+                        "resuming from new messages only.",
+                        file=sys.stderr,
+                    )
+                    last_id = new_anchor
             time.sleep(poll_seconds)
+
+    def compact(self, keep_last: int = 200) -> int:
+        """Move all-but-last-`keep_last` active messages into a new archive
+        segment and rewrite chat.jsonl with only the recent tail.
+
+        History is preserved — archive segments are stitched back by _read_all,
+        so `recv --id <old>` and an archived cursor still resolve. This REWRITES
+        chat.jsonl, so run it when the channel is quiet: a concurrent send on
+        another machine forces a rebase of the rewrite. Returns the number of
+        messages archived (0 = nothing to do).
+        """
+        if keep_last < 0:
+            raise ValueError("keep_last must be >= 0")
+        with self._send_lock():
+            if self._has_remote():
+                self._pull_rebase()
+            active = self._read_file(self.chat_file)
+            if len(active) <= keep_last:
+                return 0
+            to_archive = active if keep_last == 0 else active[:-keep_last]
+            keep = [] if keep_last == 0 else active[-keep_last:]
+
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            # Time-prefixed, zero-padded name → lexicographic == chronological,
+            # so later segments (newer messages) sort after earlier ones.
+            seg_path = self.archive_dir / f"chat-{int(time.time()):012d}-{uuid.uuid4().hex[:8]}.jsonl"
+            with seg_path.open("w", encoding="utf-8") as f:
+                for m in to_archive:
+                    f.write(m.to_jsonl() + "\n")
+            tmp = self.chat_file.with_name(self.chat_file.name + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                for m in keep:
+                    f.write(m.to_jsonl() + "\n")
+            os.replace(tmp, self.chat_file)
+
+            for rel in (seg_path, self.chat_file):
+                add = self._git("add", str(rel.relative_to(self.bus_repo)), check=False)
+                if add.returncode != 0:
+                    raise RuntimeError(f"git add failed: {add.stderr.strip()}")
+            commit = self._git(
+                "-c", f"user.email={self.identity}@securedchat-cli",
+                "-c", f"user.name={self.identity}",
+                "commit", "-m", f"chat: compact {self.room} ({len(to_archive)} archived)",
+                check=False,
+            )
+            if commit.returncode != 0:
+                raise RuntimeError(
+                    f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"
+                )
+            if self._has_remote():
+                result = None
+                for _ in range(3):
+                    result = self._git("push", check=False)
+                    if result.returncode == 0:
+                        break
+                    self._pull_rebase()
+                else:
+                    raise RuntimeError(f"push failed after retries: {result.stderr if result else ''}")
+        return len(to_archive)
+
+    def commit_author_map(self) -> dict[str, str]:
+        """Map message id8 → git commit author name, parsed from commit subjects
+        of the form 'chat: <room> <id8>' (the format `send` writes). Lets `recv`
+        cross-check a message's claimed `from` against who actually committed it.
+
+        Messages not committed via the CLI, or whose subject doesn't match, simply
+        don't appear → callers treat them as UNVERIFIABLE, never as spoofed. The
+        git author is authoritative because `send` sets it (-c user.name=identity)
+        and rebase preserves it across cross-machine merges.
+        """
+        sep = "\x1f"
+        out = self._git("log", f"--format=%an{sep}%s", check=False)
+        if out.returncode != 0:
+            return {}
+        pat = re.compile(rf"^chat: {re.escape(self.room)} ([0-9a-f]{{8}})$")
+        amap: dict[str, str] = {}
+        for line in out.stdout.splitlines():
+            author, _, subject = line.partition(sep)
+            m = pat.match(subject)
+            if m:
+                amap.setdefault(m.group(1), author)  # first (newest) wins
+        return amap

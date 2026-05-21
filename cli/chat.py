@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -29,7 +30,14 @@ CONFIG_ENV_BUS = "SECUREDCHAT_BUS"
 CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 
-LAST_SEEN_FILE = Path.home() / ".config" / "securedchat" / "last-seen-id"
+CONFIG_DIR = Path.home() / ".config" / "securedchat"
+# Legacy single global cursor (pre-fix): ONE file shared by every identity and
+# room on a machine, so concurrent sessions clobbered each other's mark-seen —
+# the root cause of stale-cursor "0 pending" while messages were actually unread.
+# Retained only as a one-time read-fallback so an upgrading device keeps its place.
+LEGACY_LAST_SEEN_FILE = CONFIG_DIR / "last-seen-id"
+# Per-(identity, room) cursors live here, one file each.
+CURSOR_DIR = CONFIG_DIR / "cursors"
 
 # Cap on body length for plain `recv` output so one huge message can't flood an
 # LLM caller's context. Full body is always available via `recv --id` / `--json`.
@@ -64,9 +72,11 @@ THE LOOP (in order)
        chat.py mark-seen <ID8-of-last-handled>     (id prefix ok; resolved to full id)
 
 CURSOR MODEL
-  recv --since <id> (and the saved cursor ~/.config/securedchat/last-seen-id)
-  return only messages AFTER <id>. Ids match by PREFIX. A stale/unknown cursor
-  returns NOTHING with a warning — it never replays the whole backlog.
+  recv --since <id> (and the saved per-(identity,room) cursor under
+  ~/.config/securedchat/cursors/) return only messages AFTER <id>. The cursor is
+  scoped per identity AND room, so concurrent sessions on one machine don't
+  clobber each other's place. Ids match by PREFIX. A stale/unknown cursor returns
+  NOTHING with a warning — it never replays the whole backlog.
 
 OUTPUT FOR PROGRAMS
   --json (send/recv) emits one JSON object per line:
@@ -93,17 +103,56 @@ Run `chat.py guide` for the full agent-onboarding contract (no config needed).
 """
 
 
-def _read_last_seen() -> str | None:
+def _cursor_file(identity: str, room: str) -> Path:
+    # Sanitize so an exotic identity/room can't escape CURSOR_DIR or collide on
+    # path separators. Simple slugs (windows-claude, prometheus-relay) pass through.
+    safe = lambda s: re.sub(r"[^A-Za-z0-9._-]", "_", s)
+    return CURSOR_DIR / f"{safe(room)}__{safe(identity)}"
+
+
+def _read_last_seen(identity: str, room: str) -> str | None:
     try:
-        v = LAST_SEEN_FILE.read_text().strip()
+        v = _cursor_file(identity, room).read_text().strip()
         return v or None
     except FileNotFoundError:
-        return None
+        # Backward-compat: seed from the legacy global cursor once. The next
+        # mark-seen writes the scoped file and the legacy one is never read again.
+        try:
+            v = LEGACY_LAST_SEEN_FILE.read_text().strip()
+            return v or None
+        except FileNotFoundError:
+            return None
 
 
-def _write_last_seen(msg_id: str) -> None:
-    LAST_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LAST_SEEN_FILE.write_text(msg_id + "\n")
+def _write_last_seen(identity: str, room: str, msg_id: str) -> None:
+    f = _cursor_file(identity, room)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(msg_id + "\n")
+
+
+def _verify_from(t: "GitBusTransport", msgs: list, *, strict: bool) -> list:
+    """Cross-check each message's claimed `from` against the git commit author.
+
+    Mismatch  → warn on stderr; drop only when strict.
+    No record → UNVERIFIABLE (not committed via the CLI); keep it — manufacturing
+                a silent drop from an absent record would recreate the very
+                silent-miss anti-pattern this channel already fought.
+    """
+    amap = t.commit_author_map()
+    kept = []
+    for m in msgs:
+        author = amap.get(m.id[:8])
+        if author is not None and author != m.from_:
+            print(
+                f"securedchat: WARNING possible from-spoof: msg {m.id[:8]} claims "
+                f"from={m.from_!r} but git author={author!r}"
+                + ("  [dropped]" if strict else ""),
+                file=sys.stderr,
+            )
+            if strict:
+                continue
+        kept.append(m)
+    return kept
 
 
 def _summary_line(m: "Message", body_width: int) -> str:
@@ -138,6 +187,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     if not marker.exists():
         marker.write_text("securedchat bus repo — agent-to-agent chat only, never store code here\n")
         to_add.append(str(marker.relative_to(t.bus_repo)))
+    if t._ensure_gitattributes():  # union-merge driver for append-only chat logs
+        to_add.append(".gitattributes")
     if t.chat_file.exists():
         print(f"room already initialized: {t.chat_file}")
     else:
@@ -194,12 +245,14 @@ def cmd_recv(args: argparse.Namespace) -> None:
         print(prefix)
         print(m.body)
         return
-    since = args.since if args.since is not None else _read_last_seen()
+    since = args.since if args.since is not None else _read_last_seen(identity, room)
     msgs = t.recv(since_id=since)
     if args.addressed_to_me:
         msgs = [m for m in msgs if m.to in (None, identity)]
     if args.exclude_self:
         msgs = [m for m in msgs if m.from_ != identity]
+    if args.verify_from:
+        msgs = _verify_from(t, msgs, strict=(args.verify_from == "strict"))
     if args.summary:
         print(f"{len(msgs)} pending")
         for m in msgs:
@@ -232,14 +285,14 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
         ids = ", ".join(m.id[:12] for m in matches)
         sys.exit(f"ambiguous id prefix {args.id!r} matches {len(matches)} messages: {ids}")
     full_id = matches[0].id
-    _write_last_seen(full_id)
-    print(f"last-seen-id: {full_id} ({LAST_SEEN_FILE})")
+    _write_last_seen(identity, room, full_id)
+    print(f"last-seen-id: {full_id} ({_cursor_file(identity, room)})")
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
     bus, room, identity = _resolve_config(args)
     t = GitBusTransport(bus, room, identity)
-    since = args.since if args.since is not None else _read_last_seen()
+    since = args.since if args.since is not None else _read_last_seen(identity, room)
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
             if args.addressed_to_me and m.to not in (None, identity):
@@ -258,6 +311,16 @@ def cmd_watch(args: argparse.Namespace) -> None:
                 print(f"{prefix} {m.body}", flush=True)
     except KeyboardInterrupt:
         print("\nstopped", file=sys.stderr)
+
+
+def cmd_compact(args: argparse.Namespace) -> None:
+    bus, room, identity = _resolve_config(args)
+    t = GitBusTransport(bus, room, identity)
+    n = t.compact(keep_last=args.keep_last)
+    if n == 0:
+        print(f"nothing to compact (active <= {args.keep_last} messages)")
+    else:
+        print(f"compacted: archived {n} message(s); kept last {args.keep_last} in chat.jsonl")
 
 
 def cmd_guide(args: argparse.Namespace) -> None:
@@ -299,8 +362,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Agent pattern: `recv --addressed-to-me --exclude-self --summary` to peek,\n"
             "then `recv --id <ID8>` to read one in full. Ids match by prefix. Without\n"
-            "--since it uses the cursor (~/.config/securedchat/last-seen-id); a stale\n"
-            "cursor returns nothing (with a warning), never the whole backlog."
+            "--since it uses the per-(identity,room) cursor (~/.config/securedchat/\n"
+            "cursors/<room>__<identity>); a stale cursor returns nothing (with a\n"
+            "warning), never the whole backlog."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -332,14 +396,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="body preview width for --summary (default 80)",
     )
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
+    s_recv.add_argument(
+        "--verify-from",
+        choices=["warn", "strict"],
+        help="cross-check each message's 'from' against the git commit author. "
+             "warn = flag mismatches on stderr but keep them; strict = drop spoofed "
+             "(mismatched) messages. Ids not committed via the CLI are unverifiable "
+             "and always kept. Recommended (strict) for any mode:auto consumer.",
+    )
     s_recv.set_defaults(func=cmd_recv)
 
     s_mark = sub.add_parser(
         "mark-seen",
-        help=f"advance the cursor in {LAST_SEEN_FILE} (recv --since default source)",
+        help=f"advance the per-(identity,room) cursor under {CURSOR_DIR} (recv --since default source)",
     )
     s_mark.add_argument("id", help="message id or prefix; resolved to the full id, then written")
     s_mark.set_defaults(func=cmd_mark_seen)
+
+    s_compact = sub.add_parser(
+        "compact",
+        help="archive old messages, keep the recent tail in chat.jsonl (run when the channel is quiet)",
+    )
+    s_compact.add_argument(
+        "--keep-last",
+        type=int,
+        default=200,
+        help="number of recent messages to keep in the active file (default 200)",
+    )
+    s_compact.set_defaults(func=cmd_compact)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")

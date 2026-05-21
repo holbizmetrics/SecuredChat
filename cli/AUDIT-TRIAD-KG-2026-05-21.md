@@ -103,3 +103,38 @@
 ---
 
 *Audit v1, windows-claude S53 2026-05-21. Surfaced to the bus for termux/cloud-claude (who did the hardening) — catch #1 is the load-bearing one.*
+
+---
+
+## Addendum — PCLA-Auto session (separate concurrent windows session), 2026-05-21
+
+Two findings from an independent 4th-session audit not present in v1. Both verified by reading the code at `ae156f7`; the second by globbing the repo.
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| A1 | **HIGH** | **`watch` is structurally dead on a stale `--since`, not merely quiet.** `transport.watch()` seeds `last_id = since_id` and every poll calls `recv(since_id=last_id)` (transport.py:257, 261). When the cursor is stale, `recv` returns `[]` *regardless of newly-appended messages* (it can't find the anchor id in the log), so the `for` body never runs and `last_id` never advances. The loop therefore re-passes the same stale id forever and can **never emit anything again — including brand-new messages** — until the process is restarted with a fresh cursor. This is distinct from catch #1: catch #1 is "you can't *see* the stale warning under `2>/dev/null`"; A1 is "even watching stderr, the watcher is permanently a no-op." The guide's recommended LIVE path (`watch --addressed-to-me --exclude-self`, seeded from the saved cursor) inherits this if that saved cursor ever goes stale. | On a stale `since`, `watch()` should re-anchor `last_id` to head (or `None`) and continue, rather than spin on the unresolvable id. Pairs with v1 INVERSE #2 (surface stale-cursor to stdout). |
+| A2 | **MED** | **The commit's "16/16 CLI smoke tests pass" claim has no committed test file.** A repo glob finds only HTML/Playwright tests (`run_tests.js`, `tests/webkit-ios.spec.js`); there is no `cli/test_*.py`. The smoke tests appear to have been run ad-hoc and not committed, so the claim is not reproducible and — more importantly — the exact hardening this commit introduced (stale-cursor behavior, unified prefix matching) has **no regression net**. *Trust-the-label* (KG catalog): the audit cannot verify the strict form of "16/16" because the tests aren't in the tree. | Commit the smoke tests (even one `cli/test_cli.py`); prioritize cases covering stale/ambiguous cursor + prefix resolution, which are the parts most likely to regress. |
+
+**Cross-session note:** four concurrent same-family sessions audited this CLI on 2026-05-21. Convergence: the cursor model is the weakest area (3/4 sessions, different angles). One genuine contradiction across sessions — sender-`from` spoofing severity (MED-HIGH "drives mode:auto" vs out-of-scope "trusted private bus") — is unresolved within same-family review and should go to the 2026-05-31 external-cluster window. See memory `single-session-audit-gaps` + `parallel-session-convergence`.
+
+*Addendum by PCLA-Auto windows session. A1 is the load-bearing add (it makes the v1 catch-#1 cursor problem worse than the visibility framing implies).*
+
+---
+
+## Fix status — 2026-05-21 (PCLA-Auto windows session)
+
+All three HIGH items plus the actionable MED/LOW set below are now implemented in `chat.py` / `transport.py`, with `cli/test_chat.py` as the regression net (33 checks + a two-clone concurrent-append integration test, all green).
+
+| Item | Status | What landed |
+|---|---|---|
+| H1 concurrent-append data-loss / wedge | **FIXED** | `_ensure_gitattributes()` writes `chat.jsonl`/`chat-*.jsonl merge=union` (in `send` + `init`); two-clone test confirms divergent EOF appends rebase cleanly, both survive |
+| H2 shared global cursor | **FIXED** | cursor scoped per `(identity, room)` under `~/.config/securedchat/cursors/`, one-time legacy-global read fallback |
+| H3 pull returncode ignored | **FIXED** | `_pull_rebase()` checks rc, `rebase --abort`s a wedge, warns; replaces every swallowed `pull --rebase` site |
+| A1 watch dead-on-stale-cursor | **FIXED** | `watch()` re-anchors `last_id` to head on a stale cursor and resumes from new messages |
+| MED #4 spoofable `from` | **FIXED (opt-in)** | `recv --verify-from {warn,strict}` cross-checks `from` vs git commit author; default behaviour unchanged. Severity still owed to external-cluster review |
+| MED #5 recv unlocked vs send | **FIXED** | `recv` now holds the repo lock around its pull + read |
+| MED #8 unbounded log growth | **FIXED** | `compact` command + archive-aware `_read_all` + active-only cursor fast-path |
+| LOW #9 / A2 no committed tests | **FIXED** | `cli/test_chat.py` |
+| safety net | **ADDED** | `_read_all` dedups by id (guards a line landing in both archive + active via a union-merge/compaction race) |
+
+**Still open (deferred, lower tier):** MED #6 (lock stale-age == acquire-timeout), #7 (stale-cursor distinct non-zero exit); LOW #10 (README `guide` row), #11 (`recv --id` body cap), #12 (lock-file inside work tree), #13 (`watch` dedup-evict re-yield), #14 (push backoff), #15 (`--identity` sanitize into git -c), #16 (utf8 `errors=replace` note).
