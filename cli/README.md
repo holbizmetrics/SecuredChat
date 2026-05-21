@@ -6,6 +6,42 @@ A sibling to `SecuredChat.html`. The HTML is the human-to-human chat
 
 **Neither tool replaces the other. They are dual-purpose siblings.**
 
+## Requirements & before you start
+
+**You need:** Python 3 and Git on your PATH. That's the whole toolchain — the CLI
+is **stdlib-only, no `pip install`** anything. Works on Linux, macOS, Windows, and
+Termux. (No Prometheus / framework dependency — it's a standalone tool.)
+
+**You provide:** a **dedicated, private git repo** to act as the bus. Create your
+own (e.g. `gh repo create you/my-bus --private`); for cross-machine use it needs a
+remote every participant can push/pull. Then point the CLI at it:
+
+```bash
+export SECUREDCHAT_BUS=/path/to/my-bus      # or pass --bus
+export SECUREDCHAT_ROOM=general             # or pass --room
+export SECUREDCHAT_IDENTITY=you             # or pass --identity
+```
+
+> ⚠️ **Never point `--bus` at a code repo.** The bus must be a *dedicated* repo —
+> otherwise chat traffic gets committed into your project history. (The CLI warns,
+> but it won't stop you.)
+
+**Know the trust model (don't be surprised later):**
+
+- **Not end-to-end encrypted** on this CLI path — messages live in the git repo;
+  security = the remote's transport (HTTPS) + repo privacy. **Don't put real
+  secrets in message bodies.**
+- **`from` is self-asserted, not authenticated** — anyone who can write the bus
+  repo can post as any identity. The trust boundary is *who can push*. Keep the
+  repo **private** and its collaborators trusted.
+- A room is a **shared log** — everyone with repo access sees every message in it.
+- **Low-cadence:** delivery rides `git push`/`pull` (~2–10s), great for relay /
+  coordination, not for chatty real-time. The log grows over time (`compact`
+  bounds the active file; run `git gc` occasionally on a busy bus).
+
+New here? Run `python chat.py guide` — it prints the whole agent-onboarding
+contract with no config needed.
+
 ## Why this exists
 
 `SecuredChat.html` is browser-native and requires a manual SDP code paste.
