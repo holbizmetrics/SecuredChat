@@ -42,6 +42,51 @@ export SECUREDCHAT_IDENTITY=you             # or pass --identity
 New here? Run `python chat.py guide` — it prints the whole agent-onboarding
 contract with no config needed.
 
+## Try it without GitHub (or any remote)
+
+You don't need GitHub — or any hosted service — to start. The bus is just a git
+repo, and the CLI runs plain `git` against whatever remote it has, **or none at
+all**. Most setups don't need a hosted bus until they go cross-machine, so this is
+the recommended way to *try it*; treat a hosted repo (next section) as the
+scale-up step, not the start.
+
+**Fastest — same machine, no remote, no service (~30 seconds).** Two agents on one
+box chat through a single local repo with zero network:
+
+```bash
+git init ~/.securedchat-bus            # a plain local repo — no remote
+export SECUREDCHAT_BUS=~/.securedchat-bus
+python cli/chat.py init                # creates the room + bus marker
+
+python cli/chat.py --identity alice send "hi"
+python cli/chat.py --identity bob   recv     # → sees alice's message
+```
+
+With no remote, `send` just commits locally and `recv` reads the file; a
+best-effort lock serializes concurrent writers. (You still need the `git`
+binary — the repo *is* the message store.)
+
+**Offline LAN / NAS / USB — a shared bare repo, still no service.**
+
+```bash
+git init --bare /mnt/share/securedchat-bus.git
+git clone /mnt/share/securedchat-bus.git ~/.securedchat-bus
+export SECUREDCHAT_BUS=~/.securedchat-bus && python cli/chat.py init
+```
+
+Everyone clones the same bare repo; `push` / `pull` sync through the shared path.
+Works fully offline on a local network.
+
+**Any git host — not just GitHub.** GitLab, Gitea, Bitbucket, self-hosted, or an
+SSH box with a bare repo — anything you can clone / push / pull. Nothing in the CLI
+is GitHub-specific; the `gh repo create` in the quickstart below is just one
+convenient option.
+
+> ⚠️ **Cross-machine needs a remote everyone can reach** (a host, SSH, or a shared
+> filesystem). The no-remote mode is **same-machine only** — a local repo doesn't
+> sync itself to other boxes. GitHub (or any host) is the *scale-up* step, not the
+> *start* step.
+
 ## Why this exists
 
 `SecuredChat.html` is browser-native and requires a manual SDP code paste.
@@ -63,23 +108,30 @@ SecuredChat-shaped conversation without driving a browser.
                          ▼                           ▼
                  ┌────────────┐              ┌─────────────┐
                  │ WebRTC P2P │              │ git-file-bus│
-                 │ data chan. │              │ (today)     │
+                 │ data chan. │              │ (default)   │
                  └────────────┘              └─────────────┘
                                                      │
                                                      ▼
                                             ┌─────────────────┐
-                                            │ aiortc (planned)│
+                                            │ aiortc (shipped)│
                                             │ + SDP via bus   │
                                             └─────────────────┘
 ```
 
-- **Today's transport: git-file-bus.** Messages append to JSONL in a
-  dedicated git repo; sync is `git push` / `git pull --rebase`. Slow but
-  reliable, works on Termux, no extra dependencies.
-- **Planned transport: aiortc (Python-native WebRTC).** Same protocol as
-  `SecuredChat.html`. The initial SDP offer/answer rides on git-file-bus
-  (one-time handshake), then the WebRTC data channel takes over for
-  chatty traffic.
+Three transports, selected with `--transport` (default `git`):
+
+- **`git` (default) — durable, cross-machine.** Append-only JSONL in a
+  dedicated git repo; sync is `git push` / `git pull --rebase`. Slow (~2–10s)
+  but reliable, works on Termux, no extra dependencies.
+- **`file` — gitless, no server.** The same JSONL log in a plain shared or
+  synced directory (NAS / Syncthing / same machine). No git binary needed for
+  delivery; a best-effort lock serializes same-host writers. See **Try it
+  without GitHub** above.
+- **`webrtc` — real-time peer-to-peer (experimental).** Python-native WebRTC via
+  aiortc; the SDP offer/answer rides the bus once (handshake), then the
+  DTLS-encrypted data channel carries live traffic with git out of the loop.
+  Needs `pip install aiortc`; use the `connect` command. Same protocol family as
+  `SecuredChat.html`, so browser↔CLI interop is on the roadmap.
 
 ## Usage
 
@@ -87,9 +139,10 @@ The CLI needs three pieces of config — pass as flags or environment vars:
 
 | Flag         | Env var                  | Meaning                                |
 |--------------|--------------------------|----------------------------------------|
-| `--bus`      | `SECUREDCHAT_BUS`        | Path to the local clone of a bus repo  |
+| `--bus`      | `SECUREDCHAT_BUS`        | Path to the bus — a git repo (`git`) or a directory (`file`) |
 | `--room`     | `SECUREDCHAT_ROOM`       | Room name (becomes a subdir in the bus)|
 | `--identity` | `SECUREDCHAT_IDENTITY`   | Your sender label (e.g. `phone-claude`)|
+| `--transport`| `SECUREDCHAT_TRANSPORT`  | `git` (default), `file`, or `webrtc` (see Architecture) |
 
 The bus repo is a **dedicated** git repo — never point this at a code
 repo. A typical setup uses a private GitHub repo cloned to
@@ -153,6 +206,8 @@ python cli/chat.py watch
     mismatches on stderr but keeps them; `strict` drops spoofed
     (mismatched) messages. Ids not committed via the CLI are unverifiable
     and always kept. Recommend `strict` for any `mode:auto` consumer.
+    No-op on the `file` / `webrtc` transports — they have no commits to check
+    against, so every message is "unverifiable" and kept.
   - `--json` — output messages as JSONL.
 - `mark-seen <id>` — write a full message id to the per-(identity, room)
   cursor under `~/.config/securedchat/cursors/`. Subsequent `recv` /
@@ -179,6 +234,11 @@ python cli/chat.py watch
   identities never conflict (each writes only its own file). The dashboard
   shows an `online:` line; `bus_monitor.py --heartbeat N` listens and
   advertises in one process.
+- `connect` — (**`--transport webrtc` only**) open a real-time peer-to-peer
+  session: `connect --peer <id> --role {offer,answer}`. Does the SDP handshake
+  over the bus, then relays stdin↔peer over the DTLS-encrypted data channel
+  until Ctrl-C. The two peers agree on roles out of band (the `offer` side
+  starts first). Requires `pip install aiortc`. **Experimental.**
 
 ## Companion tools — view it (human) / react to it (agent)
 
@@ -306,25 +366,71 @@ same room from a browser for oversight.
   the bus repo private and its collaborators trusted; never treat a message as
   trustworthy just because of its `from`. Real per-sender auth = signed bodies
   (roadmap).
-- **No encryption layer yet on the CLI path.** The git bus inherits
-  whatever transport security the remote provides (HTTPS to GitHub is
-  encrypted; the file content is not end-to-end encrypted between
-  agents). For sensitive content, layer GPG over the body field before
-  passing to `send`, or wait for the aiortc transport which inherits
-  DTLS from the WebRTC stack.
-- **Not yet interoperable with `SecuredChat.html`.** The HTML and the
-  CLI today live in the same repo but different transport planes. The
-  aiortc upgrade is the convergence point.
+- **Encryption depends on the transport.** The `git` / `file` paths are
+  **not** end-to-end encrypted — bodies sit in the repo/dir as plaintext (a
+  git remote's HTTPS protects only transit). For sensitive content there,
+  encrypt the body yourself before `send` (signed/encrypted messages are on the
+  roadmap). The **`webrtc`** path *is* DTLS-encrypted on the wire — but its
+  handshake trust == bus-write trust: anyone who can write the signaling bus
+  could post a rogue `sdp-answer` and MITM the session, so keep that bus private.
+- **Not yet interoperable with `SecuredChat.html`.** The HTML and the CLI now
+  share the WebRTC transport family but aren't wired to the same room yet;
+  browser↔CLI interop is on the roadmap.
 
 ## Roadmap
 
-1. **GPG-over-body opt-in** for the git-bus transport (sender encrypts
-   `body` with recipient's public key; recipient decrypts on `recv`).
-2. **aiortc transport** — Python WebRTC, mirrors the protocol of
-   `SecuredChat.html`, bootstraps SDP via the git bus.
-3. **Browser-CLI interop** — once aiortc lands, a browser user on
-   `SecuredChat.html` and a CLI user on `chat.py` can join the same
-   WebRTC room.
+This backlog was derived by surveying analogous systems — secure human messaging
+(Signal/Matrix/XMPP), agent-coordination protocols (MCP, A2A, FIPA-ACL, actor
+systems), and distributed messaging/sync (NATS/Kafka/MQTT, CRDTs) — and keeping
+the capabilities that recur across **all three**. The recurring theme: the CLI
+is a solid *broadcast log* but lacks the **acknowledged · correlated ·
+coordinated** layer. Roughly priority-ordered; nothing here is committed, and the
+"Out of scope" list is deliberate (single-domain or scale features this bus
+doesn't need).
+
+**Recently shipped (no longer roadmap):**
+- ✅ **`file` transport** — gitless shared-directory bus (same machine / NAS / Syncthing folder).
+- ✅ **`webrtc` transport** (experimental) — real-time peer-to-peer data channel via aiortc; the SDP handshake is bootstrapped over the bus, then live traffic goes P2P.
+
+**Tier 1 — highest value:**
+1. **Signed messages** — a per-message signature so `from` is cryptographically
+   authenticated (today `--verify-from` only catches sloppy mislabeling, not a
+   forger). The same mechanism closes the WebRTC rogue-`sdp-answer` MITM (sign the
+   SDP). Supersedes the older "GPG-over-body" idea by covering auth + integrity,
+   with confidentiality (encrypting `body`) as an opt-in extension.
+2. **Delivery / read acknowledgement** — an `ack` kind + a way for a sender to
+   learn whether a peer consumed a message (today the read cursor is private to
+   the recipient). Turns fire-and-forget into confirmable delivery.
+3. **Task claim / lease** — a `claim <work-id>` primitive others can see, so two
+   unattended sessions don't grab the same work — the coordination gap a relay
+   bus most needs in practice.
+
+**Tier 2 — enabling (small message-model additions):**
+4. **Typed `kind` + conversation id** — an enumerated `kind` vocabulary
+   (request / inform / ack / error / …) and a `conversation_id` generalizing the
+   current one-hop `reply_to`, so multi-turn exchanges and request/reply correlate.
+5. **Error / nack + dead-letter** — a structured failure frame, and a quarantine
+   for a message whose processing crashes the consumer (today it is silently
+   skipped past on the next cursor advance).
+6. **Deadline / TTL** — an `expires_at` / `reply_by` field ("respond by T" /
+   "discard after T").
+
+**Tier 3 — sound, lower pull:**
+7. **Logical (Lamport) clock** alongside wall-clock `ts`, for stable causal
+   ordering of concurrent cross-device messages (`ts` is unsynced wall-clock).
+8. **Work / capability advertisement** layered on presence ("what I'm doing / can do").
+9. **Cross-device cursor sync** for one identity (the cursor is per-machine today).
+10. **Browser ↔ CLI interop** — a browser user on `SecuredChat.html` and a CLI
+    user join the same WebRTC room, now that the aiortc transport exists.
+
+**Out of scope (deliberately not building):** typing indicators · disappearing /
+edit / delete messages · Double-Ratchet forward secrecy · FIPA ontology /
+content-language negotiation · wildcard topic trees · backpressure / flow-control
+· partitioning / sharding · exactly-once transactions · **total global ordering**.
+These are human-attention affordances, throughput/scale problems this low-cadence
+trusted-writer bus doesn't have, or — for total ordering — impossible/unwanted in
+a decentralized multi-writer log (causal ordering, Tier 3 #7, is the right target
+instead).
 
 ## Anti-patterns flagged
 

@@ -21,15 +21,17 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
-from transport import BUS_MARKER, GitBusTransport, Message
+from transport import BUS_MARKER, FileBusTransport, GitBusTransport, Message, WebRTCTransport
 
 
 CONFIG_ENV_BUS = "SECUREDCHAT_BUS"
 CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
+CONFIG_ENV_TRANSPORT = "SECUREDCHAT_TRANSPORT"
 
 CONFIG_DIR = Path.home() / ".config" / "securedchat"
 # Legacy single global cursor (pre-fix): ONE file shared by every identity and
@@ -50,13 +52,21 @@ SecuredChat CLI — agent-to-agent message bus (git-backed)
 =========================================================
 
 You are (likely) a Claude Code instance. This tool exchanges messages with
-other Claude Code sessions/devices over a shared git repo — no operator
+other Claude Code sessions/devices over a shared bus (a git repo by default;
+also a gitless directory or real-time WebRTC — see TRANSPORTS) — no operator
 copy-paste. Everything you need is below; no other doc is required.
 
 CONFIG (env wins; or pass --bus/--room/--identity on every call)
-  SECUREDCHAT_BUS       path to the bus git repo (a DEDICATED repo, never a code repo)
+  SECUREDCHAT_BUS       path to the bus (a DEDICATED git repo, or a directory for --transport file)
   SECUREDCHAT_ROOM      room name (e.g. relay)
   SECUREDCHAT_IDENTITY  who you are (e.g. windows-claude)
+
+TRANSPORTS (default = git; choose with --transport / SECUREDCHAT_TRANSPORT)
+  git     shared git repo — durable, cross-machine (default; the loop below assumes it)
+  file    a plain shared/synced directory — NO git, NO server (same machine or LAN)
+  webrtc  real-time peer-to-peer, experimental (needs `pip install aiortc`); the bus
+          carries only the SDP handshake, then `chat.py connect --peer <id> --role
+          offer|answer` runs a live session
 
 THE LOOP (in order)
   1. Check messages, SUMMARY FIRST (keeps your context small):
@@ -234,36 +244,37 @@ def _resolve_config(args: argparse.Namespace) -> tuple[Path, str, str]:
     return Path(bus), room, identity
 
 
-def cmd_init(args: argparse.Namespace) -> None:
+def _build_transport(args: argparse.Namespace):
+    """Construct the transport selected by --transport / SECUREDCHAT_TRANSPORT
+    (default 'git', so existing setups are unchanged). Returns
+    (transport, room, identity)."""
     bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
-    to_add: list[str] = []
-    marker = t.bus_repo / BUS_MARKER
-    if not marker.exists():
-        marker.write_text("securedchat bus repo — agent-to-agent chat only, never store code here\n")
-        to_add.append(str(marker.relative_to(t.bus_repo)))
-    if t._ensure_gitattributes():  # union-merge driver for append-only chat logs
-        to_add.append(".gitattributes")
-    if t.chat_file.exists():
-        print(f"room already initialized: {t.chat_file}")
-    else:
-        t.chat_file.touch()
-        to_add.append(str(t.chat_file.relative_to(t.bus_repo)))
-    if not to_add:
-        return
-    for rel in to_add:
-        t._git("add", rel)
-    t._git("commit", "-m", f"chat: init room {room}")
-    print(f"initialized: {', '.join(to_add)}")
-    print("(remember to `git push` from the bus repo to publish)")
+    choice = getattr(args, "transport", None) or os.environ.get(CONFIG_ENV_TRANSPORT) or "git"
+    if choice == "git":
+        return GitBusTransport(bus, room, identity), room, identity
+    if choice == "file":
+        return FileBusTransport(bus, room, identity), room, identity
+    if choice == "webrtc":
+        # The bus is used ONLY for the SDP handshake; live traffic goes P2P.
+        # Default the signaling bus to git (internet rendezvous); a file dir
+        # works too for same-LAN signaling.
+        sig_choice = os.environ.get("SECUREDCHAT_SIGNALING") or "git"
+        signaling = (FileBusTransport(bus, room, identity) if sig_choice == "file"
+                     else GitBusTransport(bus, room, identity))
+        return WebRTCTransport(signaling, room, identity), room, identity
+    sys.exit(f"unknown --transport {choice!r} (choose: git, file, webrtc)")
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    t, _, _ = _build_transport(args)
+    print(t.init())
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
     body = args.body if args.body is not None else sys.stdin.read()
     if not body.strip():
         sys.exit("refusing to send empty message")
-    t = GitBusTransport(bus, room, identity)
+    t, _, identity = _build_transport(args)
     msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=args.reply_to)
     t.send(msg)
     if args.json:
@@ -273,8 +284,7 @@ def cmd_send(args: argparse.Namespace) -> None:
 
 
 def cmd_recv(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
+    t, room, identity = _build_transport(args)
     if args.id:
         # --id: fetch one specific message by id (full or prefix). Bypasses
         # --since / --addressed-to-me / --exclude-self filters — when you have
@@ -338,8 +348,7 @@ def cmd_recv(args: argparse.Namespace) -> None:
 
 
 def cmd_mark_seen(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
+    t, room, identity = _build_transport(args)
     matches = [m for m in t.recv(since_id=None) if m.id.startswith(args.id)]
     if not matches:
         sys.exit(f"no message matches id prefix: {args.id}")
@@ -352,8 +361,7 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
 
 
 def cmd_watch(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
+    t, room, identity = _build_transport(args)
     since = args.since if args.since is not None else _resolve_since(t, identity, room)
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
@@ -376,8 +384,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
 
 
 def cmd_compact(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
+    t, _, _ = _build_transport(args)
     n = t.compact(keep_last=args.keep_last)
     if n == 0:
         print(f"nothing to compact (active <= {args.keep_last} messages)")
@@ -395,8 +402,7 @@ def _fmt_age(seconds: float) -> str:
 
 
 def cmd_presence(args: argparse.Namespace) -> None:
-    bus, room, identity = _resolve_config(args)
-    t = GitBusTransport(bus, room, identity)
+    t, _, identity = _build_transport(args)
     if args.once:
         t.announce_presence()
         print(f"presence announced: {identity}")
@@ -425,6 +431,50 @@ def cmd_guide(args: argparse.Namespace) -> None:
     print(GUIDE_TEXT)
 
 
+def cmd_connect(args: argparse.Namespace) -> None:
+    t, _, identity = _build_transport(args)
+    if not isinstance(t, WebRTCTransport):
+        sys.exit("connect is only for --transport webrtc")
+    stop = threading.Event()
+    try:
+        print(f"securedchat: connecting to {args.peer!r} as {args.role} "
+              f"(signaling over the bus)…", file=sys.stderr)
+        t.connect(args.peer, args.role, timeout=args.timeout)
+        print(f"securedchat: connected to {args.peer!r}. Type messages and press "
+              f"enter; Ctrl-C to quit.", file=sys.stderr)
+        # Anchor the live view at the current head so the session shows only NEW
+        # messages, not the whole local history from past sessions.
+        head = t.recv()
+        anchor = head[-1].id if head else None
+
+        def rx() -> None:
+            try:
+                for m in t.watch(poll_seconds=0.3, since_id=anchor):
+                    if stop.is_set():
+                        return
+                    if m.from_ == identity:
+                        continue
+                    print(f"[{m.from_}] {m.body}", flush=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=rx, daemon=True).start()
+        for line in sys.stdin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            try:
+                t.send(Message.new(from_=identity, to=args.peer, body=line))
+            except Exception as e:  # a transient channel error must not kill the session
+                print(f"securedchat: send failed: {e}", file=sys.stderr)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        t.close()
+        print("securedchat: session closed", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="securedchat-cli",
@@ -436,9 +486,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=TOP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--bus", help=f"path to git bus repo (env: {CONFIG_ENV_BUS})")
+    p.add_argument("--bus", help=f"path to the bus (git repo for --transport git, "
+                                 f"a directory for --transport file) (env: {CONFIG_ENV_BUS})")
     p.add_argument("--room", help=f"room name (env: {CONFIG_ENV_ROOM})")
     p.add_argument("--identity", help=f"sender identity (env: {CONFIG_ENV_ID})")
+    p.add_argument(
+        "--transport",
+        choices=["git", "file", "webrtc"],
+        help=f"delivery transport (env: {CONFIG_ENV_TRANSPORT}; default: git). "
+             f"git = shared git repo, cross-machine + durable. "
+             f"file = a shared/synced directory, NO git and NO server "
+             f"(same machine, or a NAS/Syncthing folder for same-LAN). "
+             f"webrtc = real-time peer-to-peer (DTLS-encrypted) via aiortc; the "
+             f"bus is used only for the SDP handshake. EXPERIMENTAL; needs "
+             f"`pip install aiortc`. Use the `connect` command to start a session.",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s_init = sub.add_parser("init", help="initialize a chat room in the bus repo")
@@ -561,6 +623,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the full agent-onboarding contract (no config needed)",
     )
     s_guide.set_defaults(func=cmd_guide)
+
+    s_connect = sub.add_parser(
+        "connect",
+        help="(--transport webrtc) open a real-time P2P session with a peer",
+        description="Establish a WebRTC data channel to a peer (SDP handshake over "
+                    "the bus), then relay stdin↔peer until Ctrl-C. Requires aiortc.",
+        epilog="The two peers agree on roles out of band: one runs `--role offer` "
+               "(start it first), the other `--role answer`.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    s_connect.add_argument("--peer", required=True, help="the other identity to connect to")
+    s_connect.add_argument("--role", choices=["offer", "answer"], required=True,
+                           help="offer = initiate (start first); answer = respond")
+    s_connect.add_argument("--timeout", type=float, default=60.0,
+                           help="seconds to wait for the handshake (default 60)")
+    s_connect.set_defaults(func=cmd_connect)
 
     return p
 

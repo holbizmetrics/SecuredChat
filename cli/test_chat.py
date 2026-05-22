@@ -12,6 +12,7 @@ Run:  python test_chat.py    (exit 0 = all pass, 1 = a failure)
 """
 from __future__ import annotations
 
+import json
 import queue
 import shutil
 import stat
@@ -26,7 +27,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import chat  # noqa: E402
-from transport import BUS_MARKER, GitBusTransport, Message  # noqa: E402
+from transport import (  # noqa: E402
+    BUS_MARKER, FileBusTransport, GitBusTransport, Message, WebRTCTransport,
+)
 
 _failures: list[str] = []
 _passed = 0
@@ -59,10 +62,18 @@ def make_bus(root: Path, name: str) -> Path:
     return repo
 
 
-def send(t: GitBusTransport, from_: str, body: str, to: str | None = None) -> Message:
+def send(t, from_: str, body: str, to: str | None = None) -> Message:
     m = Message.new(from_=from_, to=to, body=body)
     t.send(m)
     return m
+
+
+def make_file_bus(root: Path, name: str) -> Path:
+    """A plain (NON-git) bus directory for the file transport."""
+    d = root / name
+    d.mkdir(parents=True)
+    (d / BUS_MARKER).write_text("test file bus\n")
+    return d
 
 
 # --------------------------------------------------------------------------- #
@@ -370,6 +381,183 @@ def test_identity_validation(root: Path) -> None:
         check(True, "invalid room rejected")
 
 
+def test_file_transport(root: Path) -> None:
+    print("test_file_transport (b1: shared-dir JSONL, no git, no server)")
+    busdir = make_file_bus(root, "filebus")
+    ta = FileBusTransport(busdir, "relay", "alice")
+    tb = FileBusTransport(busdir, "relay", "bob")
+
+    check(not (busdir / ".git").exists(), "file transport creates no .git (truly gitless)")
+
+    msgs = [send(ta, "alice", f"m{i}") for i in range(5)]
+    got = tb.recv(since_id=None)
+    check([m.id for m in got] == [m.id for m in msgs], "file recv(None) returns all in order")
+
+    # Two identities exchange through the same directory.
+    b = send(tb, "bob", "hi alice", to="alice")
+    seen_by_alice = ta.recv(since_id=None)
+    check(seen_by_alice[-1].id == b.id and seen_by_alice[-1].from_ == "bob",
+          "second identity's message visible to the first via the shared dir")
+
+    # Cursor semantics: full-length fast path, short prefix, stale -> [].
+    after2 = tb.recv(since_id=msgs[2].id)
+    check([m.id for m in after2] == [m.id for m in msgs[3:]] + [b.id], "file recv(full id) returns tail")
+    after2p = tb.recv(since_id=msgs[2].id[:8])
+    check([m.id for m in after2p] == [m.id for m in msgs[3:]] + [b.id], "file recv(prefix) returns tail")
+    check(tb.recv(since_id="0" * 36) == [], "file stale full-length cursor -> [] (no backlog replay)")
+
+    check(ta.last_pull_ok is True, "file transport last_pull_ok stays True (no remote to be stale against)")
+
+    # Compact roundtrip: archive, no loss, order preserved, cursor still spans.
+    n = ta.compact(keep_last=2)
+    check(n == 4, "file compact archived 4 of 6")
+    active_lines = (busdir / "relay" / "chat.jsonl").read_text().splitlines()
+    check(len(active_lines) == 2, "file active holds only kept tail (2)")
+    check((busdir / "relay" / "archive").is_dir(), "file archive dir created")
+    allm = tb.recv(since_id=None)
+    check([m.id for m in allm] == [m.id for m in msgs] + [b.id], "file recv(None) intact after compact (no loss)")
+    after_arch = tb.recv(since_id=msgs[1].id)
+    check([m.id for m in after_arch] == [m.id for m in msgs[2:]] + [b.id],
+          "file archived cursor spans archive->active")
+
+    # Presence (overwrite-per-identity, no commit, no chat pollution).
+    ta.announce_presence()
+    tb.announce_presence()
+    rows = ta.read_presence()
+    check({r["identity"] for r in rows} == {"alice", "bob"}, "file presence lists all identities")
+    ta.announce_presence()
+    rows2 = ta.read_presence()
+    check(sum(1 for r in rows2 if r["identity"] == "alice") == 1, "file presence one-file-per-identity")
+
+    # verify-from degrades gracefully: no commits -> empty map -> keep all.
+    check(ta.commit_author_map() == {}, "file commit_author_map empty (nothing to verify)")
+    kept = chat._verify_from(ta, allm, strict=True)
+    check([m.id for m in kept] == [m.id for m in allm], "file verify-from strict keeps all (unverifiable)")
+
+    # watch (shared poll loop) emits a newly appended message past the anchor.
+    out: "queue.Queue[Message]" = queue.Queue()
+    tw = FileBusTransport(busdir, "relay", "carol")
+    anchor = allm[-1].id
+
+    def run():
+        try:
+            for m in tw.watch(poll_seconds=0.2, since_id=anchor):
+                out.put(m)
+                return
+        except Exception:
+            pass
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    time.sleep(0.4)
+    newm = send(ta, "alice", "live-after-watch")
+    try:
+        emitted = out.get(timeout=4)
+        check(emitted.id == newm.id, "file watch emits a newly appended message")
+    except queue.Empty:
+        check(False, "file watch emits a newly appended message (timed out)")
+    th.join(timeout=1)
+
+    # Identity/room validation inherited from the shared base.
+    for bad in ["bad room", "x=y", "../escape", ""]:
+        try:
+            FileBusTransport(busdir, "relay", bad)
+            check(False, f"file: invalid identity {bad!r} should be rejected")
+        except RuntimeError:
+            check(True, f"file: invalid identity {bad!r} rejected")
+
+
+def test_webrtc_signaling_guard(root: Path) -> None:
+    print("test_webrtc_signaling_guard (b2: malformed SDP frames skipped; no aiortc needed)")
+    import asyncio
+    sigdir = make_file_bus(root, "wsig2")
+    ta = WebRTCTransport(FileBusTransport(sigdir, "relay", "alice"),
+                         "relay", "alice", state_dir=root / "wg")
+    sb = FileBusTransport(sigdir, "relay", "bob")
+    # A rogue/garbled, a well-addressed-but-malformed, then a valid answer.
+    sb.send(Message.new("bob", "alice", "not json at all", kind=WebRTCTransport.SIGNAL_ANSWER))
+    sb.send(Message.new("bob", "alice", json.dumps({"foo": 1}), kind=WebRTCTransport.SIGNAL_ANSWER))
+    sb.send(Message.new("bob", "alice", json.dumps({"sdp": "v=0", "type": "answer"}),
+                        kind=WebRTCTransport.SIGNAL_ANSWER))
+    desc = asyncio.run(ta._await_signal(WebRTCTransport.SIGNAL_ANSWER, "bob", timeout=5))
+    check(desc == {"sdp": "v=0", "type": "answer"},
+          "await_signal skips malformed frames and returns the valid SDP")
+    # A frame from the wrong sender is ignored (only `peer` is accepted).
+    sc = FileBusTransport(sigdir, "relay", "carol")
+    sc.send(Message.new("carol", "alice", json.dumps({"sdp": "x", "type": "answer"}),
+                        kind=WebRTCTransport.SIGNAL_ANSWER))
+    ta2 = WebRTCTransport(FileBusTransport(sigdir, "relay", "alice"),
+                          "relay", "alice", state_dir=root / "wg2")
+    try:
+        asyncio.run(ta2._await_signal(WebRTCTransport.SIGNAL_ANSWER, "dave", timeout=2))
+        check(False, "await_signal should time out when no frame from the named peer")
+    except TimeoutError:
+        check(True, "await_signal ignores frames from other senders (times out for an absent peer)")
+
+
+def test_webrtc_loopback(root: Path) -> None:
+    try:
+        import aiortc  # noqa: F401
+    except ImportError:
+        print("test_webrtc_loopback (b2): SKIP — aiortc not installed "
+              "(`pip install aiortc` to exercise the data channel)")
+        return
+    print("test_webrtc_loopback (b2: data channel over loopback, file signaling)")
+    sigdir = make_file_bus(root, "wsig")
+    sa = FileBusTransport(sigdir, "relay", "alice")
+    sb = FileBusTransport(sigdir, "relay", "bob")
+    ta = WebRTCTransport(sa, "relay", "alice", state_dir=root / "wa", ice_servers=[])
+    tb = WebRTCTransport(sb, "relay", "bob", state_dir=root / "wb", ice_servers=[])
+    errs: dict[str, Exception] = {}
+
+    def offer() -> None:
+        try:
+            ta.connect("bob", "offer", timeout=30)
+        except Exception as e:  # noqa: BLE001
+            errs["offer"] = e
+
+    def answer() -> None:
+        try:
+            tb.connect("alice", "answer", timeout=30)
+        except Exception as e:  # noqa: BLE001
+            errs["answer"] = e
+
+    th2 = threading.Thread(target=answer, daemon=True)
+    th1 = threading.Thread(target=offer, daemon=True)
+    th2.start()
+    time.sleep(0.2)
+    th1.start()
+    th1.join(35)
+    th2.join(35)
+    check(not errs, f"both peers established the data channel (errs={errs})")
+    if errs:
+        ta.close()
+        tb.close()
+        return
+
+    m = Message.new(from_="alice", to="bob", body="live p2p hello")
+    ta.send(m)
+    delivered = False
+    for _ in range(80):
+        if any(x.id == m.id for x in tb.recv(since_id=None)):
+            delivered = True
+            break
+        time.sleep(0.1)
+    check(delivered, "message delivered peer-to-peer over the data channel")
+
+    # The signaling bus carried ONLY the handshake — proves the live message
+    # never touched git/the bus (git is out of the hot path).
+    sig_msgs = sa.recv(since_id=None)
+    kinds = {sm.kind for sm in sig_msgs}
+    check(kinds <= {"sdp-offer", "sdp-answer"},
+          f"signaling bus carried only handshake frames ({kinds})")
+    check(all("live p2p hello" not in sm.body for sm in sig_msgs),
+          "live message never written to the signaling bus")
+
+    ta.close()
+    tb.close()
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -394,6 +582,9 @@ def main() -> int:
         test_bus_monitor(root)
         test_presence(root)
         test_identity_validation(root)
+        test_file_transport(root)
+        test_webrtc_signaling_guard(root)
+        test_webrtc_loopback(root)
     finally:
         _rm(root)
     print()
