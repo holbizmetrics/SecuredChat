@@ -363,6 +363,66 @@ def test_presence(root: Path) -> None:
           "presence/<identity>.json files created")
 
 
+def test_leases(root: Path) -> None:
+    print("test_leases (task claim/lease coordination, git transport)")
+    repo = make_bus(root, "bus_leases")
+    ta = GitBusTransport(repo, "relay", "alice")
+    tb = GitBusTransport(repo, "relay", "bob")
+
+    r = ta.acquire_lease("work-1", ttl=60)
+    check(r["status"] == "acquired" and r["holder"] == "alice", "first claimer acquires")
+
+    r = tb.acquire_lease("work-1", ttl=60)
+    check(r["status"] == "conflict" and r["holder"] == "alice",
+          "second claimer is refused and sees the holder")
+
+    lf = repo / "relay" / "leases" / "work-1__alice.json"
+    first = json.loads(lf.read_text(encoding="utf-8"))
+    time.sleep(0.02)
+    r = ta.acquire_lease("work-1", ttl=60)
+    second = json.loads(lf.read_text(encoding="utf-8"))
+    check(r["status"] == "renewed", "holder re-claim renews")
+    check(second["claimed_at"] == first["claimed_at"] and second["ts"] >= first["ts"],
+          "renew preserves claimed_at, advances ts")
+    check(len(list((repo / "relay" / "leases").glob("work-1__*.json"))) == 1,
+          "one lease file per (work-id, identity) — overwritten, not appended")
+
+    rows = ta.read_leases()
+    held = [x for x in rows if x["work_id"] == "work-1"]
+    check(len(held) == 1 and held[0]["holder"] == "alice" and held[0]["alive"],
+          "read_leases resolves the holder")
+
+    r = tb.acquire_lease("work-2", ttl=60)
+    check(r["status"] == "acquired" and r["holder"] == "bob", "a different work-id is independent")
+
+    ta.acquire_lease("work-3", ttl=0.05)
+    time.sleep(0.1)
+    check(ta._resolve_holder("work-3") is None, "expired lease (age>ttl) frees the work-id")
+    r = tb.acquire_lease("work-3", ttl=60)
+    check(r["status"] == "acquired" and r["holder"] == "bob", "expired lease is reclaimable by another")
+
+    r = ta.release_lease("work-1")
+    check(r["status"] == "released", "holder can release")
+    r = tb.acquire_lease("work-1", ttl=60)
+    check(r["status"] == "acquired" and r["holder"] == "bob", "released lease is reclaimable")
+
+    chatf = repo / "relay" / "chat.jsonl"
+    check((not chatf.exists()) or "lease" not in chatf.read_text(encoding="utf-8"),
+          "leases do not pollute chat.jsonl")
+
+
+def test_leases_file(root: Path) -> None:
+    print("test_leases_file (b1 leases, no git)")
+    busdir = make_file_bus(root, "filebus_leases")
+    ta = FileBusTransport(busdir, "relay", "alice")
+    tb = FileBusTransport(busdir, "relay", "bob")
+    check(ta.acquire_lease("w", ttl=60)["status"] == "acquired", "file: first claimer acquires")
+    check(tb.acquire_lease("w", ttl=60)["status"] == "conflict", "file: second claimer refused")
+    check(ta.release_lease("w")["status"] == "released", "file: holder releases")
+    check(tb.acquire_lease("w", ttl=60)["status"] == "acquired", "file: reclaim after release")
+    check(not (busdir / ".git").exists(), "file leases create no .git")
+
+
 def test_identity_validation(root: Path) -> None:
     print("test_identity_validation (R4: reject metachars in identity/room)")
     repo = make_bus(root, "bus_valid")
@@ -581,6 +641,8 @@ def main() -> int:
         test_watch_reanchor(root)
         test_bus_monitor(root)
         test_presence(root)
+        test_leases(root)
+        test_leases_file(root)
         test_identity_validation(root)
         test_file_transport(root)
         test_webrtc_signaling_guard(root)

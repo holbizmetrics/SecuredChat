@@ -426,6 +426,51 @@ def cmd_presence(args: argparse.Namespace) -> None:
         print(f"{status}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago")
 
 
+def cmd_claim(args: argparse.Namespace) -> None:
+    t, _, identity = _build_transport(args)
+    res = t.acquire_lease(args.work_id, ttl=args.ttl)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False))
+    elif res["status"] in ("acquired", "renewed"):
+        print(f"{res['status']}: {identity} holds '{args.work_id}' (ttl {args.ttl:g}s)")
+    elif res["status"] == "conflict":
+        print(f"taken: '{args.work_id}' is held by {res['holder']} "
+              f"(renewed {_fmt_age(res['age'])} ago, ttl {res['ttl']:g}s)")
+        sys.exit(3)
+    else:
+        print(json.dumps(res, ensure_ascii=False))
+
+
+def cmd_release(args: argparse.Namespace) -> None:
+    t, _, _ = _build_transport(args)
+    res = t.release_lease(args.work_id)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False))
+    elif res["status"] == "released":
+        print(f"released: '{args.work_id}'")
+    else:
+        print(f"not held by you: '{args.work_id}'")
+
+
+def cmd_leases(args: argparse.Namespace) -> None:
+    t, _, _ = _build_transport(args)
+    rows = t.read_leases()
+    if not args.all:
+        rows = [r for r in rows if r["alive"]]
+    if args.json:
+        for r in rows:
+            print(json.dumps(r, ensure_ascii=False))
+        return
+    if not rows:
+        print("no active leases" if not args.all else "no leases")
+        return
+    for r in rows:
+        if r["alive"]:
+            print(f"held  {r['work_id']:<24} by {r['holder']:<16} renewed {_fmt_age(r['age'])} ago")
+        else:
+            print(f"free  {r['work_id']:<24} (expired; claimants: {', '.join(r['contenders'])})")
+
+
 def cmd_guide(args: argparse.Namespace) -> None:
     # No config needed — a cold agent can run this with nothing set up.
     print(GUIDE_TEXT)
@@ -601,6 +646,30 @@ def build_parser() -> argparse.ArgumentParser:
     s_pres.add_argument("--window", type=float, default=300.0,
                         help="seconds within which an identity counts as online (default 300)")
     s_pres.set_defaults(func=cmd_presence)
+
+    s_claim = sub.add_parser(
+        "claim",
+        help="claim a work-id so other sessions don't duplicate the work",
+        description="Acquire a time-bound lease on <work-id>, visible to other sessions on "
+                    "the bus. Exits 3 if a different identity already holds an un-expired lease; "
+                    "re-running as the holder renews it. One file per (work-id, identity); "
+                    "contention resolves to the earliest claimer.",
+    )
+    s_claim.add_argument("work_id", help="identifier for the work/task being claimed")
+    s_claim.add_argument("--ttl", type=float, default=1800.0,
+                         help="lease lifetime seconds; expires if not renewed (default 1800 = 30 min)")
+    s_claim.add_argument("--json", action="store_true", help="output the lease record as JSON")
+    s_claim.set_defaults(func=cmd_claim)
+
+    s_release = sub.add_parser("release", help="release a work-id lease you hold")
+    s_release.add_argument("work_id", help="the work-id to release")
+    s_release.add_argument("--json", action="store_true", help="output the result as JSON")
+    s_release.set_defaults(func=cmd_release)
+
+    s_leases = sub.add_parser("leases", help="list task leases (who has claimed what)")
+    s_leases.add_argument("--all", action="store_true", help="include expired leases too")
+    s_leases.add_argument("--json", action="store_true", help="output as JSONL")
+    s_leases.set_defaults(func=cmd_leases)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")

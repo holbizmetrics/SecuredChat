@@ -359,6 +359,70 @@ class LocalJsonlBus(Transport):
         rows.sort(key=lambda r: r["ts"], reverse=True)
         return rows
 
+    # ----- lease reads (transport-agnostic) ------------------------------- #
+    # Coordination layer: one JSON file per (work_id, identity) under
+    # <room>/leases/<work-id>__<identity>.json, OVERWRITTEN on (re)claim — so an
+    # identity only ever writes its own file (conflict-free, like presence).
+    # Contention on a work_id is resolved at READ time: among un-expired claims
+    # the holder is the one with the EARLIEST claimed_at (first claimer wins;
+    # later claimers see it's taken and back off). Kept out of chat.jsonl.
+
+    @property
+    def lease_dir(self) -> Path:
+        return self.chat_file.parent / "leases"
+
+    def _lease_file(self, work_id: str) -> Path:
+        wid = re.sub(r"[^A-Za-z0-9._-]", "_", work_id)
+        who = re.sub(r"[^A-Za-z0-9._-]", "_", self.identity)
+        return self.lease_dir / f"{wid}__{who}.json"
+
+    def _collect_leases(self) -> list[dict]:
+        """One row per work_id: {work_id, holder, claimed_at, age, ttl, alive,
+        contenders}. holder/alive reflect the earliest un-expired claim; alive is
+        False when every claim for that work_id has expired (ttl seconds since its
+        last heartbeat). Pure file read — no sync."""
+        if not self.lease_dir.is_dir():
+            return []
+        now = time.time()
+        by_work: dict[str, list[dict]] = {}
+        for lf in self.lease_dir.glob("*.json"):
+            try:
+                d = json.loads(lf.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            wid = d.get("work_id")
+            if not wid:
+                continue
+            ts = float(d.get("ts") or 0.0)
+            by_work.setdefault(wid, []).append({
+                "holder": d.get("holder") or lf.stem,
+                "claimed_at": float(d.get("claimed_at") or ts),
+                "ts": ts,
+                "ttl": float(d.get("ttl") or 0.0),
+            })
+        rows: list[dict] = []
+        for wid, claims in by_work.items():
+            alive = [c for c in claims if c["ttl"] <= 0 or (now - c["ts"]) <= c["ttl"]]
+            winner = min(alive, key=lambda c: c["claimed_at"]) if alive else None
+            rows.append({
+                "work_id": wid,
+                "holder": winner["holder"] if winner else None,
+                "claimed_at": winner["claimed_at"] if winner else None,
+                "age": (now - winner["ts"]) if winner else None,
+                "ttl": winner["ttl"] if winner else None,
+                "alive": winner is not None,
+                "contenders": sorted({c["holder"] for c in claims}),
+            })
+        rows.sort(key=lambda r: r["work_id"])
+        return rows
+
+    def _resolve_holder(self, work_id: str) -> dict | None:
+        """The current un-expired holder row for work_id, or None if free."""
+        for r in self._collect_leases():
+            if r["work_id"] == work_id and r["alive"]:
+                return r
+        return None
+
     # ----- subclass surface ----------------------------------------------- #
 
     def commit_author_map(self) -> dict[str, str]:
@@ -656,6 +720,98 @@ class GitBusTransport(LocalJsonlBus):
                 self._pull_rebase()
         return self._collect_presence()
 
+    # ----- task leases (claim / release / read) --------------------------- #
+    # Same conflict-free one-file-per-(work,identity) model as presence, plus
+    # commit/push so other devices see the claim. Acquire refuses if a *different*
+    # identity already holds an un-expired lease on the work_id; re-acquiring as
+    # the holder renews it (preserving the original claimed_at).
+
+    def acquire_lease(self, work_id: str, ttl: float = 1800.0) -> dict:
+        with self._send_lock():
+            if self._has_remote():
+                self._pull_rebase()
+            held = self._resolve_holder(work_id)
+            if held and held["holder"] != self.identity:
+                return {"status": "conflict", "work_id": work_id, "holder": held["holder"],
+                        "age": held["age"], "ttl": held["ttl"]}
+            self.lease_dir.mkdir(parents=True, exist_ok=True)
+            lf = self._lease_file(work_id)
+            now = time.time()
+            claimed_at, renew = now, False
+            if lf.exists():
+                try:
+                    claimed_at = float(json.loads(lf.read_text(encoding="utf-8")).get("claimed_at") or now)
+                    renew = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+            payload = {"work_id": work_id, "holder": self.identity, "claimed_at": claimed_at,
+                       "ts": now, "ttl": ttl, "kind": "lease"}
+            lf.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            add = self._git("add", str(lf.relative_to(self.bus_repo)), check=False)
+            if add.returncode != 0:
+                raise RuntimeError(f"git add failed: {add.stderr.strip()}")
+            commit = self._git(
+                "-c", f"user.email={self.identity}@securedchat-cli",
+                "-c", f"user.name={self.identity}",
+                "commit", "-m", f"lease: {self.room} {work_id} {self.identity}", check=False,
+            )
+            if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr).lower():
+                raise RuntimeError(f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
+            if self._has_remote():
+                pushed, result = False, None
+                for _ in range(3):
+                    result = self._git("push", check=False)
+                    if result.returncode == 0:
+                        pushed = True
+                        break
+                    self._pull_rebase()
+                if not pushed:
+                    raise RuntimeError(f"lease push failed after retries: {result.stderr if result else ''}")
+                self._pull_rebase()  # re-resolve who actually won a near-simultaneous race
+            winner = self._resolve_holder(work_id)
+            if winner and winner["holder"] != self.identity:
+                return {"status": "conflict", "work_id": work_id, "holder": winner["holder"],
+                        "age": winner["age"], "ttl": winner["ttl"]}
+            return {"status": "renewed" if renew else "acquired", "work_id": work_id,
+                    "holder": self.identity, "ttl": ttl}
+
+    def release_lease(self, work_id: str) -> dict:
+        with self._send_lock():
+            if self._has_remote():
+                self._pull_rebase()
+            lf = self._lease_file(work_id)
+            if not lf.exists():
+                return {"status": "not-held", "work_id": work_id}
+            rel = str(lf.relative_to(self.bus_repo))
+            lf.unlink()
+            self._git("add", rel, check=False)  # stages the deletion
+            commit = self._git(
+                "-c", f"user.email={self.identity}@securedchat-cli",
+                "-c", f"user.name={self.identity}",
+                "commit", "-m", f"lease-release: {self.room} {work_id} {self.identity}", check=False,
+            )
+            if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr).lower():
+                raise RuntimeError(f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
+            if self._has_remote():
+                pushed, result = False, None
+                for _ in range(3):
+                    result = self._git("push", check=False)
+                    if result.returncode == 0:
+                        pushed = True
+                        break
+                    self._pull_rebase()
+                if not pushed:
+                    raise RuntimeError(f"lease release push failed after retries: {result.stderr if result else ''}")
+            return {"status": "released", "work_id": work_id}
+
+    def read_leases(self, pull: bool = True) -> list[dict]:
+        """All leases (one row per work_id), earliest-claimer resolved. Pass
+        pull=False to skip the git pull when the caller already refreshed."""
+        if pull and self._has_remote():
+            with self._send_lock():
+                self._pull_rebase()
+        return self._collect_leases()
+
 
 class FileBusTransport(LocalJsonlBus):
     """Append-only JSONL in a plain directory — no git, no server.
@@ -746,6 +902,41 @@ class FileBusTransport(LocalJsonlBus):
 
     def read_presence(self, pull: bool = True) -> list[dict]:
         return self._collect_presence()
+
+    # ----- task leases (claim / release / read) — no git --------------------- #
+
+    def acquire_lease(self, work_id: str, ttl: float = 1800.0) -> dict:
+        with self._send_lock():
+            held = self._resolve_holder(work_id)
+            if held and held["holder"] != self.identity:
+                return {"status": "conflict", "work_id": work_id, "holder": held["holder"],
+                        "age": held["age"], "ttl": held["ttl"]}
+            self.lease_dir.mkdir(parents=True, exist_ok=True)
+            lf = self._lease_file(work_id)
+            now = time.time()
+            claimed_at, renew = now, False
+            if lf.exists():
+                try:
+                    claimed_at = float(json.loads(lf.read_text(encoding="utf-8")).get("claimed_at") or now)
+                    renew = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+            payload = {"work_id": work_id, "holder": self.identity, "claimed_at": claimed_at,
+                       "ts": now, "ttl": ttl, "kind": "lease"}
+            lf.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            return {"status": "renewed" if renew else "acquired", "work_id": work_id,
+                    "holder": self.identity, "ttl": ttl}
+
+    def release_lease(self, work_id: str) -> dict:
+        with self._send_lock():
+            lf = self._lease_file(work_id)
+            if not lf.exists():
+                return {"status": "not-held", "work_id": work_id}
+            lf.unlink()
+            return {"status": "released", "work_id": work_id}
+
+    def read_leases(self, pull: bool = True) -> list[dict]:
+        return self._collect_leases()
 
 
 class _BackgroundLoop:
