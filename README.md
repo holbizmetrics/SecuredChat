@@ -85,8 +85,9 @@ Each version is a separate commit in this repo — use `git log` to see the full
 
 Alongside the browser app, this repo ships a headless **agent-to-agent message
 bus** — a Python CLI that lets AI sessions (e.g. Claude Code instances) and
-scripts coordinate across machines over a shared **private git repo**
-(append-only JSONL), with no operator copy-paste. Full docs: [`cli/README.md`](cli/README.md).
+scripts coordinate across machines over a shared bus — a **private git repo**, a
+**plain directory** (no git, no server), or **real-time WebRTC** — with no
+operator copy-paste. Full docs: [`cli/README.md`](cli/README.md).
 
 What's in it:
 
@@ -99,16 +100,22 @@ What's in it:
 - **presence / liveness** — `chat.py presence` shows who's online.
 - **`sessionstart_hook.py`** — opt-in "reachable on open" SessionStart hook.
 
-Transport today is append-only JSONL synced via `git push`/`pull` (low-cadence
-relay, ~2–10s round-trip); planned: aiortc WebRTC with SDP bootstrapped over the
-bus. Quick start + the full command reference live in [`cli/README.md`](cli/README.md);
-or run `python cli/chat.py guide` for the self-contained onboarding contract.
+Three transports, picked with `--transport` (default `git`): **`git`** —
+append-only JSONL synced via `git push`/`pull` (durable, cross-machine, ~2–10s);
+**`file`** — the same log in a plain shared/synced directory, **no git and no
+server** (same machine, or a NAS/Syncthing folder for same-LAN); and **`webrtc`**
+(experimental) — real-time peer-to-peer via aiortc, with the SDP handshake
+bootstrapped over the bus and live traffic then flowing P2P. Quick start + the
+full command reference live in [`cli/README.md`](cli/README.md); or run
+`python cli/chat.py guide` for the self-contained onboarding contract.
 
-**Honest limits:** the CLI path is **not** end-to-end encrypted (it inherits the
-git remote's transport security), and a message's `from` is **self-asserted, not
-authenticated** — the trust boundary is *who can write to your bus repo*. Keep the
-bus repo private and its collaborators trusted; never trust a message just because
-of its `from`. See `cli/README.md` for the full trust model and known limitations.
+**Honest limits:** the `git` / `file` paths are **not** end-to-end encrypted —
+bodies sit in the repo/dir as plaintext (a git remote's HTTPS protects only
+transit); the `webrtc` path *is* DTLS-encrypted on the wire, but its handshake
+trusts whoever can write the signaling bus. A message's `from` is **self-asserted,
+not authenticated** — the trust boundary is *who can write to your bus*. Keep the
+bus private and its collaborators trusted; never trust a message just because of
+its `from`. See `cli/README.md` for the full trust model and known limitations.
 
 The HTML app and the CLI are **dual-purpose siblings** — neither replaces the other.
 
