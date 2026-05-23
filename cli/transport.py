@@ -506,7 +506,15 @@ class GitBusTransport(LocalJsonlBus):
         abort any half-finished rebase so the repo isn't left wedged for the next
         op, and warn loudly instead of silently serving stale local state as if
         current (the false "0 pending" failure). Returns True on success."""
-        res = self._git("pull", "--rebase", "--autostash", check=False)
+        # Pin the upstream remote+branch so a multi-ref FETCH_HEAD can't trigger
+        # "fatal: Cannot rebase onto multiple branches" (seen live during a
+        # concurrent-push storm). Fall back to a bare pull if there's no upstream.
+        up = self._git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", check=False)
+        if up.returncode == 0 and "/" in up.stdout.strip():
+            remote, branch = up.stdout.strip().split("/", 1)
+            res = self._git("pull", "--rebase", "--autostash", remote, branch, check=False)
+        else:
+            res = self._git("pull", "--rebase", "--autostash", check=False)
         if res.returncode == 0:
             self.last_pull_ok = True
             return True
