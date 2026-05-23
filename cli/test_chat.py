@@ -643,6 +643,48 @@ def test_webrtc_loopback(root: Path) -> None:
     tb.close()
 
 
+def test_send_lock_windows_permission_error(root: Path) -> None:
+    """Stale-lock break must NOT crash with PermissionError on Windows.
+
+    Windows raises PermissionError [WinError 32] when unlinking a file held
+    open by another process; POSIX unlink succeeds. _send_lock catches the
+    PermissionError and falls back to back-off + retry.
+    """
+    import os as _os
+    from unittest.mock import patch
+    repo = make_bus(root, "winlock")
+    t = GitBusTransport(repo, "relay", "alice")
+
+    lock_path = t.chat_file.parent / ".send.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_bytes(b"")
+    far_past = time.time() - 1000
+    _os.utime(lock_path, (far_past, far_past))
+
+    real_unlink = Path.unlink
+    calls = {"n": 0}
+
+    def fake_unlink(self: Path, *a, **kw):
+        if self == lock_path and calls["n"] == 0:
+            calls["n"] += 1
+            raise PermissionError(32, "WinError 32 simulated")
+        return real_unlink(self, *a, **kw)
+
+    with patch.object(Path, "unlink", fake_unlink):
+        t0 = time.time()
+        try:
+            with t._send_lock(timeout=2.0):
+                pass
+            crashed = False
+        except PermissionError:
+            crashed = True
+        elapsed = time.time() - t0
+
+    check(not crashed, "_send_lock survives PermissionError on stale-break (no crash)")
+    check(calls["n"] == 1, "PermissionError simulated exactly once during stale-break")
+    check(elapsed < 3.0, f"_send_lock returns within timeout after retry (elapsed={elapsed:.2f}s)")
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -673,6 +715,7 @@ def main() -> int:
         test_file_transport(root)
         test_webrtc_signaling_guard(root)
         test_webrtc_loopback(root)
+        test_send_lock_windows_permission_error(root)
     finally:
         _rm(root)
     print()

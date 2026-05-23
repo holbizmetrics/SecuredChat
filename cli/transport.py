@@ -290,7 +290,15 @@ class LocalJsonlBus(Transport):
                 except FileNotFoundError:
                     continue
                 if age > timeout or time.time() > deadline:
-                    lock_path.unlink(missing_ok=True)  # break stale lock, then retry
+                    try:
+                        lock_path.unlink(missing_ok=True)  # break stale lock, then retry
+                    except PermissionError:
+                        # Windows: unlink fails with WinError 32 while another
+                        # process holds the file open. POSIX unlink succeeds on
+                        # open files; Windows doesn't. A PermissionError here
+                        # means the holder is alive — the lock isn't actually
+                        # stale. Back off and retry like ordinary contention.
+                        time.sleep(0.1)
                     continue
                 time.sleep(0.1)
         try:
