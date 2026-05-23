@@ -325,6 +325,16 @@ def cmd_recv(args: argparse.Namespace) -> None:
         msgs = [m for m in msgs if m.from_ != identity]
     if args.verify_from != "off":
         msgs = _verify_from(t, msgs, strict=(args.verify_from == "strict"))
+    if getattr(args, "ack", False):
+        _prior = {m.reply_to for m in t.recv(since_id=None)
+                  if m.kind == "ack" and m.from_ == identity}
+        _to_ack = [m for m in msgs if m.kind != "ack" and m.from_ != identity
+                   and m.to in (None, identity) and m.id not in _prior]
+        for _m in _to_ack:
+            _emit_ack(t, identity, _m)
+        if _to_ack:
+            print(f"securedchat: acked {len(_to_ack)} message(s)",
+                  file=(sys.stderr if args.json else sys.stdout))
     if args.summary:
         print(f"{len(msgs)} pending")
         for m in msgs:
@@ -471,6 +481,52 @@ def cmd_leases(args: argparse.Namespace) -> None:
             print(f"free  {r['work_id']:<24} (expired; claimants: {', '.join(r['contenders'])})")
 
 
+def _emit_ack(t, identity: str, target: Message) -> None:
+    """Send a delivery receipt for `target`: kind=ack, addressed to its sender,
+    reply_to = the acked message's id. Empty body — the receipt IS the payload."""
+    t.send(Message.new(from_=identity, to=target.from_, body="", kind="ack", reply_to=target.id))
+
+
+def cmd_ack(args: argparse.Namespace) -> None:
+    t, _, identity = _build_transport(args)
+    all_msgs = t.recv(since_id=None)
+    acked: list[str] = []
+    for raw in args.ids:
+        matches = [m for m in all_msgs if m.id.startswith(raw) and m.kind != "ack"]
+        if not matches:
+            print(f"no message matches id: {raw}", file=sys.stderr)
+            continue
+        if len(matches) > 1:
+            print(f"ambiguous id {raw!r}: {', '.join(m.id[:12] for m in matches)}", file=sys.stderr)
+            continue
+        _emit_ack(t, identity, matches[0])
+        acked.append(matches[0].id[:8])
+    print(f"acked: {', '.join(acked) if acked else '(none)'}")
+
+
+def cmd_delivered(args: argparse.Namespace) -> None:
+    t, _, _ = _build_transport(args)
+    all_msgs = t.recv(since_id=None)
+    matches = [m for m in all_msgs if m.id.startswith(args.id) and m.kind != "ack"]
+    if not matches:
+        sys.exit(f"no message matches id: {args.id}")
+    if len(matches) > 1:
+        sys.exit(f"ambiguous id {args.id!r}: {', '.join(m.id[:12] for m in matches)}")
+    target = matches[0]
+    acks = sorted([m for m in all_msgs if m.kind == "ack" and (m.reply_to or "") == target.id],
+                  key=lambda x: x.ts)
+    if args.json:
+        for a in acks:
+            print(a.to_jsonl())
+        return
+    if not acks:
+        print(f"{target.id[:8]} — not yet acknowledged")
+        return
+    print(f"{target.id[:8]} acknowledged by:")
+    for a in acks:
+        print(f"  {a.from_:<16} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a.ts))}")
+
+
 def cmd_guide(args: argparse.Namespace) -> None:
     # No config needed — a cold agent can run this with nothing set up.
     print(GUIDE_TEXT)
@@ -601,6 +657,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
     s_recv.add_argument(
+        "--ack",
+        action="store_true",
+        help="acknowledge each consumed message addressed to me (emit kind=ack receipts so "
+             "the sender can see delivery via `delivered`); deduped against prior acks",
+    )
+    s_recv.add_argument(
         "--verify-from",
         choices=["off", "warn", "strict"],
         default="warn",
@@ -670,6 +732,23 @@ def build_parser() -> argparse.ArgumentParser:
     s_leases.add_argument("--all", action="store_true", help="include expired leases too")
     s_leases.add_argument("--json", action="store_true", help="output as JSONL")
     s_leases.set_defaults(func=cmd_leases)
+
+    s_ack = sub.add_parser(
+        "ack",
+        help="acknowledge consumed message(s) so the sender sees delivery",
+        description="Emit a delivery receipt (kind=ack, reply_to=<msg-id>) for each given "
+                    "message id. The sender queries receipts with `delivered`.",
+    )
+    s_ack.add_argument("ids", nargs="+", help="message id(s) to acknowledge (full or prefix)")
+    s_ack.set_defaults(func=cmd_ack)
+
+    s_delivered = sub.add_parser(
+        "delivered",
+        help="show who has acknowledged a message you sent",
+    )
+    s_delivered.add_argument("id", help="the message id (full or prefix) to check")
+    s_delivered.add_argument("--json", action="store_true", help="output acks as JSONL")
+    s_delivered.set_defaults(func=cmd_delivered)
 
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")

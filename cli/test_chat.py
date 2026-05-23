@@ -423,6 +423,31 @@ def test_leases_file(root: Path) -> None:
     check(not (busdir / ".git").exists(), "file leases create no .git")
 
 
+def test_delivery_ack(root: Path) -> None:
+    print("test_delivery_ack (kind=ack receipts + delivered query)")
+    repo = make_bus(root, "bus_ack")
+    ta = GitBusTransport(repo, "relay", "alice")
+    tb = GitBusTransport(repo, "relay", "bob")
+    tc = GitBusTransport(repo, "relay", "carol")
+
+    m = send(ta, "alice", "please process X")  # broadcast
+    # bob + carol acknowledge: kind=ack, reply_to=m.id (what `ack` / `recv --ack` emit)
+    tb.send(Message.new(from_="bob", to="alice", body="", kind="ack", reply_to=m.id))
+    tc.send(Message.new(from_="carol", to="alice", body="", kind="ack", reply_to=m.id))
+
+    allm = ta.recv(since_id=None)
+    acks = [x for x in allm if x.kind == "ack" and (x.reply_to or "") == m.id]
+    check({x.from_ for x in acks} == {"bob", "carol"},
+          "delivered: both receipts attributed to the right message")
+    one = acks[0]
+    check(one.kind == "ack" and one.reply_to == m.id and one.body == "",
+          "ack message shape (kind=ack, reply_to set, empty body)")
+
+    m2 = send(ta, "alice", "second")
+    acks2 = [x for x in ta.recv(since_id=None) if x.kind == "ack" and (x.reply_to or "") == m2.id]
+    check(acks2 == [], "delivered: an un-acked message has no receipts")
+
+
 def test_identity_validation(root: Path) -> None:
     print("test_identity_validation (R4: reject metachars in identity/room)")
     repo = make_bus(root, "bus_valid")
@@ -643,6 +668,7 @@ def main() -> int:
         test_presence(root)
         test_leases(root)
         test_leases_file(root)
+        test_delivery_ack(root)
         test_identity_validation(root)
         test_file_transport(root)
         test_webrtc_signaling_guard(root)
