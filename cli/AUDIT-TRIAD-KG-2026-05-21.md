@@ -137,4 +137,15 @@ All three HIGH items plus the actionable MED/LOW set below are now implemented i
 | LOW #9 / A2 no committed tests | **FIXED** | `cli/test_chat.py` |
 | safety net | **ADDED** | `_read_all` dedups by id (guards a line landing in both archive + active via a union-merge/compaction race) |
 
-**Still open (deferred, lower tier):** MED #6 (lock stale-age == acquire-timeout), #7 (stale-cursor distinct non-zero exit); LOW #10 (README `guide` row), #11 (`recv --id` body cap), #12 (lock-file inside work tree), #13 (`watch` dedup-evict re-yield), #14 (push backoff), #15 (`--identity` sanitize into git -c), #16 (utf8 `errors=replace` note).
+**v3.3.3 pre-tag triage (2026-05-25)** — reconciled the deferred list against current code:
+
+- **FIXED since this audit:** #10 (`guide` command shipped + documented), #15 (`--identity`/room sanitized via `_SAFE_NAME` in `LocalJsonlBus.__init__`, covered by `test_identity_validation`), #16 (`_force_utf8_io()` reconfigures stdout/stderr with `errors="replace"`). Also landed after this audit: the Windows lock-break crash (`330077c`) and the blind-audit regressions R1–R4 (`1ac63b1`).
+- **By design (not a defect):** #11 — `recv --id` is intentionally the *uncapped* full-read path (the recovery route for previews truncated by `DEFAULT_BODY_CAP`); capping it would defeat its purpose.
+- **Deferred to v3.3.4 (all low-impact on a low-cadence trusted-writer bus — do NOT block v3.3.3):**
+  - **MED #6** lock stale-age == acquire-timeout — mitigated on Windows (a *live* holder makes `unlink` raise `PermissionError` → we back off instead of breaking, `330077c`); on POSIX a slow-but-live holder past `timeout` could still be broken. Real fix = a separate stale-age (≫ timeout) or a PID/liveness check.
+  - **MED #7** stale cursor → now a LOUD stderr warning (R2 `last_pull_ok`) but still exit 0; a distinct non-zero exit is a scripting nicety, not correctness.
+  - **LOW #12** `.send.lock` lives in the work tree — but it's transient (created/removed within the lock context) and `send` only `git add`s the chat file (never `git add -A`), so it's never committed; moving it out is hygiene.
+  - **LOW #13** `watch` dedup-evict re-yield edge — only reachable under sustained high churn this bus isn't built for.
+  - **LOW #14** push retry has no backoff — immediate rebase-then-retry is fine at this cadence; exponential backoff matters only under a concurrent-push storm.
+
+None of the deferred items block `v3.3.3`. The one true tag gate remains the **external / cross-family review** (the `from`-spoof severity from the cross-session note above + the leg-3 signing design).

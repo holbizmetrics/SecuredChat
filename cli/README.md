@@ -153,6 +153,9 @@ is convention, not a requirement.
 
 ### Quickstart
 
+> For task-oriented, step-by-step recipes (start-here / create a bus, multi-session
+> coordination, signing rollout, background monitor), see [`../COOKBOOK.md`](../COOKBOOK.md).
+
 ```bash
 # one-time setup (per machine)
 gh repo create your-org/securedchat-bus --private --clone
@@ -358,21 +361,30 @@ same room from a browser for oversight.
   loudly (no silent "0 pending" off stale local state); `recv` holds the
   repo lock around its pull+read. Covered by `cli/test_chat.py` (full suite
   + a two-clone concurrent-append integration test).
-- **Identity is self-asserted, not authenticated.** `--identity` sets the git
-  author, so a message's `from` reflects who *committed* the line, not a verified
-  sender — anyone with write access to your bus repo can set any author. The
-  trust boundary is **who can push to the bus**. `recv --verify-from` (default
-  `warn`) flags accidental/sloppy mislabeling, **not** a determined forger. Keep
-  the bus repo private and its collaborators trusted; never treat a message as
-  trustworthy just because of its `from`. Real per-sender auth = signed bodies
-  (roadmap).
-- **Encryption depends on the transport.** The `git` / `file` paths are
-  **not** end-to-end encrypted — bodies sit in the repo/dir as plaintext (a
-  git remote's HTTPS protects only transit). For sensitive content there,
-  encrypt the body yourself before `send` (signed/encrypted messages are on the
-  roadmap). The **`webrtc`** path *is* DTLS-encrypted on the wire — but its
-  handshake trust == bus-write trust: anyone who can write the signaling bus
-  could post a rogue `sdp-answer` and MITM the session, so keep that bus private.
+- **Identity: self-asserted by default; cryptographically authenticated once you
+  enable signing (leg 3).**
+  - *Without signing:* `--identity` sets the git author, so a message's `from`
+    reflects who *committed* the line, not a verified sender — anyone with write
+    access can set any author. The trust boundary is **who can push to the bus**.
+    `recv --verify-from` (default `warn`) flags sloppy mislabeling, **not** a
+    determined forger.
+  - *With signing:* `keygen` a key, peers `trust` it (pin the public key, shared
+    out of band), and read with `recv --verify-sig strict` (or env
+    `SECUREDCHAT_VERIFY_SIG=strict`). Now `from` is **real per-sender
+    authentication** — a message verifies only if signed by the key pinned for
+    that identity; tamper and from-spoofing are rejected. Trust moves to **who
+    holds the pinned keys.** `--verify-sig` defaults to `off` so an existing
+    unsigned bus isn't broken on upgrade; progress **off → warn → strict** as your
+    fleet adopts keys. See `../THREAT_MODEL.md`.
+- **Encryption depends on the transport — and signed ≠ secret.** The `git` /
+  `file` paths are **not** end-to-end encrypted — bodies sit in the repo/dir as
+  plaintext (a git remote's HTTPS protects only transit). Signing authenticates
+  and integrity-protects, but does **not** hide the body; for confidentiality
+  there, encrypt the body yourself before `send` (sealed-envelope body encryption
+  is roadmap). The **`webrtc`** path *is* DTLS-encrypted on the wire — but its
+  handshake trust == bus-write trust today: anyone who can write the signaling bus
+  could post a rogue `sdp-answer` and MITM the session (signing the SDP frames to
+  close this is the v3.3.4 follow-up), so keep that bus private.
 - **Not yet interoperable with `SecuredChat.html`.** The HTML and the CLI now
   share the WebRTC transport family but aren't wired to the same room yet;
   browser↔CLI interop is on the roadmap.

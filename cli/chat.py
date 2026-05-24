@@ -25,6 +25,7 @@ import threading
 import time
 from pathlib import Path
 
+import signing
 from transport import BUS_MARKER, FileBusTransport, GitBusTransport, Message, WebRTCTransport
 
 
@@ -32,6 +33,7 @@ CONFIG_ENV_BUS = "SECUREDCHAT_BUS"
 CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 CONFIG_ENV_TRANSPORT = "SECUREDCHAT_TRANSPORT"
+CONFIG_ENV_VERIFY_SIG = "SECUREDCHAT_VERIFY_SIG"  # off|warn|strict fleet-wide default for recv/watch
 
 CONFIG_DIR = Path.home() / ".config" / "securedchat"
 # Legacy single global cursor (pre-fix): ONE file shared by every identity and
@@ -92,8 +94,9 @@ CURSOR MODEL
 OUTPUT FOR PROGRAMS
   --json (send/recv) emits one JSON object per line:
     {"ts":<float>,"id":<uuid>,"from":<str>,"to":<str|null>,"kind":"msg",
-     "body":<str>,"reply_to":<id|absent>}
-  to:null = broadcast. Errors go to stderr with a non-zero exit code.
+     "body":<str>,"reply_to":<id|absent>,"sig":<armored|absent>,"sig_alg":<absent|"ssh">}
+  to:null = broadcast. sig/sig_alg present only on signed messages (see SIGNING).
+  Errors go to stderr with a non-zero exit code.
 
 LIVE
   chat.py watch --addressed-to-me --exclude-self   # stream new messages
@@ -120,10 +123,26 @@ REACT ON YOUR OWN (background monitor, for an unattended session)
   report back (send --to <them>) and wait for the operator (maybe on another
   device) to approve by replying. step (surface+wait) <-> act-within-perms &
   escalate-on-bus <-> skip-all (never).
-  TRUST: 'from' is self-asserted, NOT authenticated — the trust boundary is who
-  can write to the bus repo. --verify-from flags sloppy mislabels, not a
-  determined writer (who can set any git author). Real per-sender auth = signed
-  bodies (roadmap). Keep your bus repo private + collaborators trusted.
+  TRUST: by default 'from' is self-asserted, NOT authenticated — the trust
+  boundary is who can write to the bus repo, and --verify-from flags only sloppy
+  mislabels (a determined writer sets any git author). With SIGNING enabled
+  (below), 'from' becomes real per-sender auth. Either way: a signed message is
+  AUTHENTICATED, not TRUSTED — signing tells you WHO, not whether to comply
+  (prompt injection rides a valid signature). Keep your bus repo private.
+
+SIGNING (leg 3 — cryptographic 'from' authentication; opt-in)
+  Setup once:  chat.py keygen                 # makes your ed25519 key; prints your
+                                              # PUBLIC key to share OUT OF BAND
+               chat.py trust <peer> '<their-pubkey-line>'   # pin each peer's key
+               chat.py trusted                # list pinned keys
+  Then: send/ack/connect SIGN automatically (a key exists); add --no-sign to opt out.
+  Read with verification:
+               chat.py recv  --verify-sig strict   # drop anything not VERIFIED
+               chat.py watch --verify-sig strict   # (off|warn|strict; env
+                                                   #  SECUREDCHAT_VERIFY_SIG)
+  Default is off so an unsigned bus still works; progress off -> warn -> strict as
+  peers adopt keys. Backend = ssh-keygen -Y (no new dependency). Revoke a key with
+  `untrust <peer>`. Full details + what signing does/doesn't buy: ../THREAT_MODEL.md
 
 WHO'S ONLINE (presence / liveness)
   chat.py presence              # list identities + how long since each was seen
@@ -220,6 +239,50 @@ def _verify_from(t: "GitBusTransport", msgs: list, *, strict: bool) -> list:
     return kept
 
 
+def _maybe_sign(identity: str, msg: "Message", enabled: bool = True) -> "Message":
+    """Sign `msg` in place if signing is enabled AND this identity has a key.
+    Auto-on once you `keygen` — so msg/ack/connect frames are all signed without
+    a per-call flag. `--no-sign` (send only) or a missing key → unsigned, which
+    is fine: recv's --verify-sig governs how peers treat unsigned messages."""
+    if enabled and signing.have_key(identity):
+        try:
+            msg.sig = signing.sign(msg, identity=identity)
+            msg.sig_alg = signing.SIG_ALG
+        except signing.SigningError as e:
+            sys.exit(f"securedchat: signing failed: {e}")
+    return msg
+
+
+def _verify_sig(msgs: list, *, policy: str) -> list:
+    """Verify each message's signature against pinned allowed_signers.
+
+    policy: 'warn'  → flag non-verified on stderr, KEEP them (observability
+                       during rollout — an all-unsigned bus shouldn't vanish).
+            'strict'→ DROP anything not VERIFIED (fail-closed: unsigned,
+                       unknown-signer, bad-sig, and verify-errors all rejected).
+    A BAD_SIG (a pinned key exists but bytes don't match = tamper/forgery) is the
+    strongest signal — it's labelled ALERT either way; only strict drops it."""
+    kept = []
+    for m in msgs:
+        res = signing.verify(m)
+        if res.status is signing.SigStatus.VERIFIED:
+            kept.append(m)
+            continue
+        label = {
+            signing.SigStatus.UNSIGNED: "unsigned",
+            signing.SigStatus.UNKNOWN_SIGNER: "no pinned key verifies this sender",
+            signing.SigStatus.BAD_SIG: "BAD SIGNATURE — tampered or forged",
+            signing.SigStatus.ERROR: f"verify error ({res.detail})",
+        }[res.status]
+        sev = "ALERT" if res.status is signing.SigStatus.BAD_SIG else "WARNING"
+        drop = policy == "strict"
+        print(f"securedchat: {sev} sig {m.id[:8]} from={m.from_!r}: {label}"
+              + ("  [dropped]" if drop else ""), file=sys.stderr)
+        if not drop:
+            kept.append(m)
+    return kept
+
+
 def _summary_line(m: "Message", body_width: int) -> str:
     body = m.body.replace("\n", " ").replace("\r", " ")
     if len(body) > body_width:
@@ -276,6 +339,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         sys.exit("refusing to send empty message")
     t, _, identity = _build_transport(args)
     msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=args.reply_to)
+    _maybe_sign(identity, msg, enabled=not args.no_sign)
     t.send(msg)
     if args.json:
         print(msg.to_jsonl())
@@ -325,6 +389,9 @@ def cmd_recv(args: argparse.Namespace) -> None:
         msgs = [m for m in msgs if m.from_ != identity]
     if args.verify_from != "off":
         msgs = _verify_from(t, msgs, strict=(args.verify_from == "strict"))
+    sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
+    if sig_policy != "off":
+        msgs = _verify_sig(msgs, policy=sig_policy)
     if getattr(args, "ack", False):
         _prior = {m.reply_to for m in t.recv(since_id=None)
                   if m.kind == "ack" and m.from_ == identity}
@@ -373,12 +440,15 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
 def cmd_watch(args: argparse.Namespace) -> None:
     t, room, identity = _build_transport(args)
     since = args.since if args.since is not None else _resolve_since(t, identity, room)
+    sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
             if args.addressed_to_me and m.to not in (None, identity):
                 continue
             if args.exclude_self and m.from_ == identity:
                 continue
+            if sig_policy != "off" and not _verify_sig([m], policy=sig_policy):
+                continue  # dropped by strict policy (warn keeps + already logged)
             if args.json:
                 print(m.to_jsonl(), flush=True)
             else:
@@ -484,7 +554,9 @@ def cmd_leases(args: argparse.Namespace) -> None:
 def _emit_ack(t, identity: str, target: Message) -> None:
     """Send a delivery receipt for `target`: kind=ack, addressed to its sender,
     reply_to = the acked message's id. Empty body — the receipt IS the payload."""
-    t.send(Message.new(from_=identity, to=target.from_, body="", kind="ack", reply_to=target.id))
+    m = Message.new(from_=identity, to=target.from_, body="", kind="ack", reply_to=target.id)
+    _maybe_sign(identity, m)
+    t.send(m)
 
 
 def cmd_ack(args: argparse.Namespace) -> None:
@@ -532,6 +604,54 @@ def cmd_guide(args: argparse.Namespace) -> None:
     print(GUIDE_TEXT)
 
 
+def cmd_keygen(args: argparse.Namespace) -> None:
+    # Local key management — no bus/room needed, only an identity.
+    identity = args.identity or os.environ.get(CONFIG_ENV_ID)
+    if not identity:
+        sys.exit(f"missing --identity (or env {CONFIG_ENV_ID})")
+    existed = signing.have_key(identity)
+    if existed and not args.force:
+        kp, pub = signing.key_path(identity), signing.pub_path(identity).read_text(encoding="utf-8").strip()
+        print(f"key already exists: {kp}  (use --force to regenerate)")
+    else:
+        kp, pub = signing.keygen(identity, overwrite=args.force)
+        print(f"{'regenerated' if existed else 'generated'} ed25519 key: {kp}")
+    print("public key — share this OUT OF BAND (a channel you trust) so peers can pin it:")
+    print(f"  {pub}")
+    print("each peer then runs:")
+    print(f"  securedchat-cli trust {identity} '{pub}'")
+
+
+def cmd_trust(args: argparse.Namespace) -> None:
+    pubkey = " ".join(args.pubkey).strip() if args.pubkey else sys.stdin.read().strip()
+    if not pubkey:
+        sys.exit("no public key given (pass it after the principal, or pipe it on stdin)")
+    try:
+        added = signing.add_pin(args.principal, pubkey)
+    except signing.SigningError as e:
+        sys.exit(f"securedchat: {e}")
+    print(f"{'pinned' if added else 'already pinned'}: {args.principal}  "
+          f"({signing.allowed_signers_path()})")
+
+
+def cmd_untrust(args: argparse.Namespace) -> None:
+    n = signing.remove_pin(args.principal)
+    print(f"removed {n} pinned key(s) for {args.principal!r}"
+          + ("" if n else " (nothing to remove)"))
+    if n:
+        print("NOTE: peers who haven't pulled this removal still accept the old key "
+              "until they do — that window is the revocation residual (see THREAT_MODEL.md).")
+
+
+def cmd_trusted(args: argparse.Namespace) -> None:
+    pins = signing.list_pins()
+    if not pins:
+        print(f"no pinned keys ({signing.allowed_signers_path()} is empty or absent)")
+        return
+    for principal, keytype, prefix in pins:
+        print(f"{principal:<18} {keytype:<16} {prefix}…")
+
+
 def cmd_connect(args: argparse.Namespace) -> None:
     t, _, identity = _build_transport(args)
     if not isinstance(t, WebRTCTransport):
@@ -565,7 +685,9 @@ def cmd_connect(args: argparse.Namespace) -> None:
             if not line:
                 continue
             try:
-                t.send(Message.new(from_=identity, to=args.peer, body=line))
+                m = Message.new(from_=identity, to=args.peer, body=line)
+                _maybe_sign(identity, m)
+                t.send(m)
             except Exception as e:  # a transient channel error must not kill the session
                 print(f"securedchat: send failed: {e}", file=sys.stderr)
     except KeyboardInterrupt:
@@ -613,6 +735,12 @@ def build_parser() -> argparse.ArgumentParser:
     s_send.add_argument("--kind", default="msg", help="message kind (default: msg)")
     s_send.add_argument("--reply-to", help="id of the message this replies to (threading)")
     s_send.add_argument("--json", action="store_true", help="print sent message as JSONL")
+    s_send.add_argument(
+        "--no-sign", action="store_true",
+        help="do not sign even if this identity has a key (default: sign when a "
+             "key exists, see `keygen`). Unsigned messages are accepted by peers "
+             "unless they run recv/watch with --verify-sig strict.",
+    )
     s_send.set_defaults(func=cmd_send)
 
     s_recv = sub.add_parser(
@@ -671,6 +799,17 @@ def build_parser() -> argparse.ArgumentParser:
              "mismatched; off = skip (saves a git log per recv). NOTE: this catches "
              "accidental/sloppy mislabeling, NOT a determined forger — anyone with "
              "write access to the bus can set any git author. It is not authentication.",
+    )
+    s_recv.add_argument(
+        "--verify-sig",
+        choices=["off", "warn", "strict"],
+        default=None,
+        help=f"verify each message's cryptographic signature against pinned keys "
+             f"(see `trust`/`keygen`). off (default) = skip; warn = flag "
+             f"unsigned/unknown/bad on stderr but keep; strict = drop anything not "
+             f"VERIFIED (fail-closed). Env {CONFIG_ENV_VERIFY_SIG} sets a fleet-wide "
+             f"default. Recommended progression: off → warn (once peers sign) → "
+             f"strict (once all keys pinned). THIS is real authentication of 'from'.",
     )
     s_recv.set_defaults(func=cmd_recv)
 
@@ -764,6 +903,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip messages where from == this identity (suppress self-echo)",
     )
     s_watch.add_argument("--json", action="store_true", help="output as JSONL")
+    s_watch.add_argument(
+        "--verify-sig", choices=["off", "warn", "strict"], default=None,
+        help=f"verify signatures on streamed messages (see recv --verify-sig); "
+             f"strict drops non-verified. Env {CONFIG_ENV_VERIFY_SIG} sets the default.",
+    )
     s_watch.set_defaults(func=cmd_watch)
 
     s_guide = sub.add_parser(
@@ -771,6 +915,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the full agent-onboarding contract (no config needed)",
     )
     s_guide.set_defaults(func=cmd_guide)
+
+    s_keygen = sub.add_parser(
+        "keygen",
+        help="generate this identity's ed25519 signing key (prints the public key to share)",
+        description="Create a dedicated ed25519 keypair for --identity under "
+                    "~/.config/securedchat/keys/ (SECUREDCHAT_HOME overrides). Prints the "
+                    "public key to distribute OUT OF BAND; peers pin it with `trust`. "
+                    "Once a key exists, send/ack/connect sign automatically.",
+    )
+    s_keygen.add_argument("--force", action="store_true",
+                          help="overwrite an existing key (a key roll — peers must re-`trust`)")
+    s_keygen.set_defaults(func=cmd_keygen)
+
+    s_trust = sub.add_parser(
+        "trust",
+        help="pin a peer's public key (first-contact / key-roll) into allowed_signers",
+        description="Add '<principal> <pubkey>' to ~/.config/securedchat/allowed_signers — the "
+                    "SSH-authorized_keys analog. The principal MUST match the peer's --identity "
+                    "(recv binds verification to the claimed `from`). Multiple keys per principal "
+                    "are allowed (both verify) so a key roll needs no flag day.",
+    )
+    s_trust.add_argument("principal", help="the peer identity this key belongs to (== their --identity)")
+    s_trust.add_argument("pubkey", nargs="*",
+                         help="the peer's public key line (ssh-ed25519 AAAA... [comment]); "
+                              "if omitted, read from stdin")
+    s_trust.set_defaults(func=cmd_trust)
+
+    s_untrust = sub.add_parser(
+        "untrust",
+        help="revoke: remove ALL pinned keys for a principal from allowed_signers",
+    )
+    s_untrust.add_argument("principal", help="the peer identity to revoke")
+    s_untrust.set_defaults(func=cmd_untrust)
+
+    s_trusted = sub.add_parser(
+        "trusted",
+        help="list pinned keys (principals + key fingerprints) in allowed_signers",
+    )
+    s_trusted.set_defaults(func=cmd_trusted)
 
     s_connect = sub.add_parser(
         "connect",

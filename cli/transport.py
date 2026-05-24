@@ -20,11 +20,15 @@ only its own delivery/sync.
 Message wire format (JSONL line):
 
     {"ts": <unix-float>, "id": <uuid>, "from": <str>, "to": <str-or-null>,
-     "kind": "msg", "body": <str>, "reply_to": <id-or-absent>}
+     "kind": "msg", "body": <str>, "reply_to": <id-or-absent>,
+     "sig": <armored-ssh-signature-or-absent>, "sig_alg": <tag-or-absent>}
 
 `to: null` = broadcast within the room. `kind` reserved for future control
 frames (sdp-offer, sdp-answer, presence, etc.). `reply_to` is the id of the
-message this one answers (threading); absent when not a reply.
+message this one answers (threading); absent when not a reply. `sig`/`sig_alg`
+are the optional per-message signature (leg 3) — absent on unsigned messages;
+the signature covers the content tuple, NOT itself (see signing.py). The
+`sig_alg` tag lets a future signing backend be added without a wire break.
 
 Parsing is deliberately tolerant: unknown keys are ignored (a newer peer may
 add fields) and missing keys are defaulted (an older peer may omit them), so a
@@ -64,6 +68,8 @@ class Message:
     kind: str
     body: str
     reply_to: str | None = None
+    sig: str | None = None       # armored SSH signature over canonical_payload (leg 3)
+    sig_alg: str | None = None   # signature scheme tag, e.g. "ssh"; absent when unsigned
 
     @classmethod
     def new(cls, from_: str, to: str | None, body: str, kind: str = "msg",
@@ -89,6 +95,9 @@ class Message:
         }
         if self.reply_to is not None:
             d["reply_to"] = self.reply_to
+        if self.sig is not None:
+            d["sig"] = self.sig
+            d["sig_alg"] = self.sig_alg or "ssh"
         return json.dumps(d, ensure_ascii=False)
 
     @classmethod
@@ -105,6 +114,8 @@ class Message:
             kind=str(d.get("kind", "msg")),
             body=str(d.get("body", "")),
             reply_to=d.get("reply_to"),
+            sig=d.get("sig"),
+            sig_alg=d.get("sig_alg"),
         )
 
 

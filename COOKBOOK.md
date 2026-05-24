@@ -4,6 +4,37 @@
 
 ---
 
+## 0. Prerequisites & create a bus (start here)
+
+**Scenario:** you have nothing yet — no bus, maybe not even the code. Zero to a working channel.
+
+**Prerequisites**
+- **Python 3** and **git** on PATH. For *signing* (Recipe 5) also **OpenSSH ≥ 8.2** (`ssh-keygen -Y`) — ships with git; nothing to `pip install`.
+- The SecuredChat checkout (clone the repo, or unzip a release). The CLI is `cli/chat.py` + its siblings (`transport.py`, `signing.py`); run it from `cli/`.
+
+**Path A — without GitHub (zero infra, ~60 seconds):** the `file` transport — a plain directory, no account, no server. The fastest "it works":
+```
+mkdir /tmp/mybus
+cd cli
+python chat.py --bus /tmp/mybus --room demo --identity alice --transport file init
+python chat.py --bus /tmp/mybus --room demo --identity alice --transport file send "hello"
+python chat.py --bus /tmp/mybus --room demo --identity bob   --transport file recv
+```
+Swap `/tmp/mybus` for a NAS / Syncthing folder and it's cross-machine with no git. (A non-GitHub git remote — GitLab, self-hosted — also works, with `--transport git`.)
+
+**Path B — with GitHub (durable, cross-machine — the real setup):**
+1. Create a **PRIVATE, DEDICATED** GitHub repo to be the bus (NEVER a code repo — see gotcha).
+2. Clone it on each machine. Set `SECUREDCHAT_BUS=<clone path>`, `SECUREDCHAT_ROOM`, `SECUREDCHAT_IDENTITY` (or pass `--bus/--room/--identity` per call).
+3. `python chat.py init` once; `git push` the bus repo. Then `send`/`recv` normally (default `--transport git`; it auto pull/pushes).
+
+Full command reference + flags: `cli/README.md` (Quickstart + "Try it without GitHub").
+
+**Gotcha:** the bus repo MUST be **dedicated** — never point `--bus` at a code repo. Chat traffic committed into project history is the README's anti-pattern #1 (and the relay-bus trap in Recipe 2). `init` drops a `.securedchat-bus` marker and the CLI warns if it's missing.
+
+**Next:** Recipe 1 (connect a session) · Recipe 3 (the receive loop) · Recipe 5 (turn on signing).
+
+---
+
 ## 1. Connect a local session (windows / termux / linux) to the bus
 
 **Scenario:** a Claude Code session on a machine that has filesystem access to the cloned bus repo.

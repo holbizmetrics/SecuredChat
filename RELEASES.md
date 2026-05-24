@@ -14,12 +14,18 @@ Releases are **tag-gated**: batch coherent work before tagging · **merge ≠ re
 | transports | `file` (gitless shared dir) + `webrtc` (experimental P2P) | ✅ merged (`757ccb3`, `dffa789`) |
 | 1 | **task-lease** — `claim` / `release` / `leases`; conflict-free per-(work-id, identity) leases, first-claimer-wins, TTL expiry | ✅ shipped `d8fb267` |
 | 2 | **delivery-ack** — `ack` / `delivered` / `recv --ack`; `kind=ack` receipts (`reply_to`=acked id) | ✅ shipped `fbd106b` |
-| 3 | **signed-messages** — per-message signature so `from` is cryptographically authenticated (closes the trust gap + the WebRTC rogue-`sdp-answer` MITM) | ⏳ **remaining** |
+| 3 | **signed-messages** — per-message ed25519 signature (via `ssh-keygen -Y`, no new dep) so `from` is cryptographically authenticated + body is integrity-protected | ✅ **shipped** (branch `feature/leg3-signed-messages`) |
 
-**To cut `v3.3.3`:** land **signed-messages** (leg 3) → full suite green → tag.
-*Leg 3 is crypto (keypair gen + distribution/pinning, sign + verify over `body`+`from`). Do it in a focused session — rushing crypto ships broken security. Prefer **pinned keys** (SSH-`authorized_keys` style) over a CA/PKI at this scale; confidentiality (encrypt `body`) and certificates are optional later rungs.*
+**Leg 3 (shipped) — what's in:** `keygen` / `trust` / `untrust` / `trusted`, auto-sign on send/ack/connect, `recv`/`watch --verify-sig {off,warn,strict}` (+ env `SECUREDCHAT_VERIFY_SIG`). Backend is OpenSSH `ssh-keygen -Y sign/verify`; trust store is an `allowed_signers` file (the SSH-`authorized_keys` model). Signature covers the full content tuple (not just `body`), bound to the claimed `from`. New module `cli/signing.py`; wire gains optional `sig`/`sig_alg` (backward-compatible — old peers ignore them). See `THREAT_MODEL.md` for exactly what this does and doesn't buy.
 
-Full suite currently **96 checks green** (`cli/test_chat.py`; `webrtc_loopback` SKIPs without `aiortc`).
+**To cut `v3.3.3`:** signing is in + full suite green → **but do NOT tag yet.** The one rung no in-family work substitutes — **external / cross-family review of the signed-messages design** (the 2026-05-31 window the audit doc names) — gates the *tag*, not the merge. Tag after that review.
+
+**Deferred to `v3.3.4` (named, not forgotten):**
+- **Automated key lifecycle** — signed `key-roll` frame (accepted only when signed by the *old* key; the *compromise* case needs out-of-band re-pin, a distinct path) and `revoke` frame. Interim story is manual `trust`/`untrust`, which already gives a working rotation+revocation.
+- **Sign the WebRTC SDP handshake** to close the rogue-`sdp-answer` MITM — the signing primitive is now in place; applying it to `sdp-offer`/`sdp-answer` frames is the remaining wiring.
+- Optional **body encryption** (sealed envelope) and **Lamport-clock replay** binding remain Tier-2/3 as before.
+
+Full suite currently **121 checks green** (`cli/test_chat.py`; `test_signing` SKIPs without `ssh-keygen`; `webrtc_loopback` SKIPs without `aiortc`).
 
 ## Known limitations (honest; documented, not yet fixed)
 *These bite only under concurrency/scale on the **git** transport — fine for a low-cadence, trusted-writer bus.*
