@@ -93,6 +93,10 @@ What's in it:
 
 - **`chat.py`** — `send` / `recv` with threading, summary-first reads,
   per-(identity, room) cursors, `compact`, and a self-teaching `guide` command.
+- **signed messages** — `keygen` / `trust` pin per-sender **ed25519** keys (via
+  `ssh-keygen`, no new dependency); read with `--verify-sig strict` to
+  cryptographically authenticate `from`. Opt-in and backward-compatible (signed
+  and unsigned coexist on one bus). See [`THREAT_MODEL.md`](THREAT_MODEL.md).
 - **`bus_console.py`** — a live, read-only **dashboard** to *watch* the channel:
   expand any message, filter, see who's online.
 - **`bus_monitor.py`** — a background **watcher** for the Claude Code Monitor
@@ -112,10 +116,16 @@ full command reference live in [`cli/README.md`](cli/README.md); or run
 **Honest limits:** the `git` / `file` paths are **not** end-to-end encrypted —
 bodies sit in the repo/dir as plaintext (a git remote's HTTPS protects only
 transit); the `webrtc` path *is* DTLS-encrypted on the wire, but its handshake
-trusts whoever can write the signaling bus. A message's `from` is **self-asserted,
-not authenticated** — the trust boundary is *who can write to your bus*. Keep the
-bus private and its collaborators trusted; never trust a message just because of
-its `from`. See `cli/README.md` for the full trust model and known limitations.
+trusts whoever can write the signaling bus. A message's `from` is **self-asserted
+by default**, so without signing the trust boundary is *who can write to your bus*
+— keep it private and its collaborators trusted. With **signed messages** enabled
+(`keygen` + `trust` + `--verify-sig strict`), `from` becomes cryptographically
+authenticated and tampering is rejected; signing is **off by default** so existing
+buses keep working, and even then **signed ≠ secret** (bodies stay plaintext —
+encrypt them yourself if needed). Signing does **not** defend against a
+compromised endpoint or **prompt injection of a legitimate sender** (a signed
+message is *authenticated, not trusted*). Full trust model:
+[`THREAT_MODEL.md`](THREAT_MODEL.md); CLI limits: [`cli/README.md`](cli/README.md).
 
 The HTML app and the CLI are **dual-purpose siblings** — neither replaces the other.
 
