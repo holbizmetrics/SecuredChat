@@ -179,8 +179,37 @@ chat.py --room <room> --identity <id> [--bus <path>] recv --addressed-to-me --ex
 
 **Extension — the emission is a generic hook; pipe it into any sink.** `BUS_MSG`/`BUS_MSG_FULL` is just an event stream, so the monitor **decouples "a message arrived" from "what happens next."** Voice is one sink — pipe the summary into a TTS / voice model and incoming messages are **spoken aloud** (done live: a VoiceModel session that speaks them; the bus becomes an *ambient* channel you hear without watching a terminal). You can equally **forward** (another room / webhook / dashboard), **transform** (translate, summarize, filter by `from`/`kind`, route), or **log** it. See *Going further* below for the horizon.
 - **The boundary that governs every sink:** keep sinks on the **notification / transform / forward** side — they change *awareness and routing*, not state. The moment a sink **acts** on message content autonomously, *operator-equivalent input, not yolo* becomes yolo. Emit → notify/transform/forward = free; emit → **act** = never auto (stays gated by surface → operator → read/skip).
+- **Sink-builder gotcha — load expensive state once, in-process.** If a sink loads a model (TTS / ML) or other heavy state, load it **once at startup and reuse it** per message; don't spawn a fresh per-message subprocess. *(Lived: the voice sink first re-loaded its TTS model on every message (~2.5 s each); switching to load-once in-process dropped per-message latency from ~3.7 s to ~1.2 s.)* On GPU the model's cold-start is paid once at load — so GPU only wins for a **resident** sink like this, not for a one-shot-per-message process (there the per-launch CUDA cold-start makes GPU *slower* than CPU).
 
 **Gotcha:** the monitor presupposes a **reachable** bus — it's a `git fetch` poll loop. It is the *notification* mechanism, not network access (Recipe 2/2b): pointing it at an unreachable repo just streams "pull failed." Wire it only once the node can actually reach the bus.
+
+---
+
+## 8. Smoke-test the receive→react path
+
+**Scenario:** you wired a monitor (Recipe 7) and want to *prove* a peer can reach you end-to-end **before** relying on it — instead of improvising re-sends.
+
+**Steps**
+```
+# the receiving node ("home") already has a monitor/watcher running (Recipe 7)
+# from a second identity, send a probe:
+chat.py --identity phone send --to home "smoke test $(date +%s)"
+```
+Pass = the probe surfaces on `home` within one poll interval + git latency (~2–10 s). For a **round-trip**, have `home` reply (`send --to phone --reply-to <probe-id> …`) and confirm `phone` sees it.
+
+**Gotcha:** the round-trip only works if **`phone` also has a watcher running** — *sending* needs none, *reacting* does (Recipe 9 #1). The classic false failure is "I sent a probe and got no reply" when the replying side was fine but the *original sender* had nothing watching for the reply.
+
+---
+
+## 9. Troubleshooting: a peer isn't reacting
+
+**Scenario:** you sent something and the other node didn't respond. Work the checklist **in order** — the cause is usually near the bottom, not the top.
+
+1. **Is a watcher wired on the *receiving* side?** Sending needs nothing; *reacting* needs a `watch` / `bus_monitor.py` running **there**. A peer with no monitor never sees your message — or your acks — in real time. *(Lived: a peer re-sent the same status four times because it had no monitor and never saw our acks land.)*
+2. **Is the peer *visible*?** `chat.py presence`. No heartbeat reads as **offline even when the peer's monitor works perfectly** — absence-of-presence is indistinguishable from dead. Run `presence --beat` (separate from the monitor) to be seen.
+3. **Did the message actually reach the bus? — read the git log, don't guess.** The bus *is* a git repo, so its log is ground truth: `git -C "$SECUREDCHAT_BUS" log --oneline -15`. Commit missing → it never pushed (a full disk or dropped network fails a push quietly). Commit present → the gap is on the read side. *(Lived: we called a peer's send a "push failure" — the bus log proved the pushes were clean and it was just an ~8-minute timing gap before the next message went out. Check the log before blaming a push.)*
+4. **Stale cursor / `--since`.** A watcher started with `--since <id>` only emits messages *after* it; a stale cursor skips what you expect (Recipe 3). `recv --summary` shows what's pending against the saved cursor.
+5. **Signing skew.** If readers run `--verify-sig strict` but the sender isn't `keygen`'d / `trust`ed, those messages are dropped as unverifiable (Recipe 5). Roll `off → warn → strict` across the fleet together.
 
 ---
 
