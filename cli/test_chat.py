@@ -13,6 +13,7 @@ Run:  python test_chat.py    (exit 0 = all pass, 1 = a failure)
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shutil
 import stat
@@ -27,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import chat  # noqa: E402
+import signing  # noqa: E402
 from transport import (  # noqa: E402
     BUS_MARKER, FileBusTransport, GitBusTransport, Message, WebRTCTransport,
 )
@@ -695,6 +697,92 @@ def _rm(path: Path) -> None:
     shutil.rmtree(path, onerror=onerr)
 
 
+def test_signing(root: Path) -> None:
+    print("test_signing (leg 3: ssh-keygen sign/verify + envelope + policy)")
+    if not shutil.which(signing._ssh_keygen()):
+        print("  SKIP  ssh-keygen not found")
+        return
+    home = root / "sig_home"
+    old_home = os.environ.get("SECUREDCHAT_HOME")
+    os.environ["SECUREDCHAT_HOME"] = str(home)
+    try:
+        # --- canonicalisation: the #1 homegrown-crypto bug is signing X but
+        # verifying Y. Pin that sign and verify see byte-identical input. ---
+        m = Message.new(from_="alice", to=None, body="hi ünïçødé ☃ \"quotes\"", kind="msg")
+        wire = m.to_jsonl()
+        m2 = Message.from_jsonl(wire)
+        check(signing.canonical_payload(m) == signing.canonical_payload(m2),
+              "canonical stable across to_jsonl/from_jsonl round-trip")
+        reordered = json.dumps(
+            {"body": m.body, "kind": m.kind, "to": m.to, "from": m.from_,
+             "id": m.id, "ts": m.ts}, ensure_ascii=False)
+        check(signing.canonical_payload(m) == signing.canonical_payload(Message.from_jsonl(reordered)),
+              "canonical independent of wire key order")
+        m4 = Message.from_jsonl(wire); m4.body = "tampered"
+        check(signing.canonical_payload(m) != signing.canonical_payload(m4),
+              "canonical changes when content changes")
+
+        # --- keygen + sign ---
+        kp, apub = signing.keygen("alice")
+        check(kp.exists() and apub.startswith("ssh-ed25519 "), "keygen wrote ed25519 key + pubkey")
+        m.sig = signing.sign(m, identity="alice"); m.sig_alg = signing.SIG_ALG
+        check(m.sig.startswith("-----BEGIN SSH SIGNATURE-----"), "sign produced armored SSH signature")
+
+        # --- envelope survives the wire; old unsigned lines parse cleanly ---
+        mw = Message.from_jsonl(m.to_jsonl())
+        check(mw.sig == m.sig and mw.sig_alg == "ssh", "sig/sig_alg survive to_jsonl/from_jsonl")
+        old = Message.from_jsonl(json.dumps(
+            {"ts": 1.0, "id": "x", "from": "a", "to": None, "kind": "msg", "body": "b"}))
+        check(old.sig is None and old.sig_alg is None, "pre-leg3 unsigned line parses with sig=None")
+
+        # --- verify classifications ---
+        check(signing.verify(m).status is signing.SigStatus.UNKNOWN_SIGNER, "pre-pin -> UNKNOWN_SIGNER")
+        check(signing.add_pin("alice", apub) is True, "add_pin alice -> new entry")
+        check(signing.add_pin("alice", apub) is False, "add_pin alice again -> dedup no-op")
+        check(signing.is_pinned("alice"), "alice now pinned")
+        check(signing.verify(m).status is signing.SigStatus.VERIFIED, "pinned + signed -> VERIFIED")
+        check(signing.verify(mw).status is signing.SigStatus.VERIFIED, "wire-roundtripped copy still VERIFIED")
+        mt = Message.from_jsonl(m.to_jsonl()); mt.body = "TAMPERED"
+        check(signing.verify(mt).status is signing.SigStatus.BAD_SIG, "body tamper -> BAD_SIG")
+        ms = Message.from_jsonl(m.to_jsonl()); ms.from_ = "bob"
+        check(signing.verify(ms).status is not signing.SigStatus.VERIFIED,
+              "from-spoof not VERIFIED (from is inside the signed payload)")
+        check(signing.verify(Message.new("alice", None, "x")).status is signing.SigStatus.UNSIGNED,
+              "no signature -> UNSIGNED")
+
+        # --- allowed_signers injection / validation ---
+        rejected = 0
+        for pk in ["not-a-key", apub + "\nbob ssh-ed25519 AAAAinjected", "ssh-ed25519"]:
+            try:
+                signing.add_pin("eve", pk)
+            except signing.SigningError:
+                rejected += 1
+        check(rejected == 3, "add_pin rejects malformed / newline-injection pubkeys")
+        try:
+            signing.add_pin("bad principal!", apub); unsafe_ok = False
+        except signing.SigningError:
+            unsafe_ok = True
+        check(unsafe_ok, "add_pin rejects unsafe principal name")
+
+        # --- policy ladder via chat._verify_sig ---
+        good = Message.from_jsonl(m.to_jsonl())
+        uns = Message.new("alice", None, "plain")
+        check(len(chat._verify_sig([good, uns], policy="warn")) == 2,
+              "policy warn keeps verified + unsigned")
+        check([x.id for x in chat._verify_sig([good, uns], policy="strict")] == [good.id],
+              "policy strict drops unsigned, keeps verified")
+
+        # --- revoke ---
+        check(signing.remove_pin("alice") == 1, "remove_pin alice -> 1 removed")
+        check(signing.verify(m).status is signing.SigStatus.UNKNOWN_SIGNER,
+              "post-revoke -> UNKNOWN_SIGNER")
+    finally:
+        if old_home is None:
+            os.environ.pop("SECUREDCHAT_HOME", None)
+        else:
+            os.environ["SECUREDCHAT_HOME"] = old_home
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
     try:
@@ -716,6 +804,7 @@ def main() -> int:
         test_webrtc_signaling_guard(root)
         test_webrtc_loopback(root)
         test_send_lock_windows_permission_error(root)
+        test_signing(root)
     finally:
         _rm(root)
     print()
