@@ -153,6 +153,9 @@ is convention, not a requirement.
 
 ### Quickstart
 
+> For task-oriented, step-by-step recipes (start-here / create a bus, multi-session
+> coordination, signing rollout, background monitor), see [`../COOKBOOK.md`](../COOKBOOK.md).
+
 ```bash
 # one-time setup (per machine)
 gh repo create your-org/securedchat-bus --private --clone

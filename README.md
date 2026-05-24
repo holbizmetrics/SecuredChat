@@ -87,7 +87,8 @@ Alongside the browser app, this repo ships a headless **agent-to-agent message
 bus** — a Python CLI that lets AI sessions (e.g. Claude Code instances) and
 scripts coordinate across machines over a shared bus — a **private git repo**, a
 **plain directory** (no git, no server), or **real-time WebRTC** — with no
-operator copy-paste. Full docs: [`cli/README.md`](cli/README.md).
+operator copy-paste. Full docs: [`cli/README.md`](cli/README.md); step-by-step
+recipes (incl. **start here / create a bus**): [`COOKBOOK.md`](COOKBOOK.md).
 
 What's in it:
 
