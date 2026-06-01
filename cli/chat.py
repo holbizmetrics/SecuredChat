@@ -439,7 +439,13 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
 
 def cmd_watch(args: argparse.Namespace) -> None:
     t, room, identity = _build_transport(args)
-    since = args.since if args.since is not None else _resolve_since(t, identity, room)
+    if args.from_now:
+        # anchor to current head so a fresh watch streams only new arrivals
+        # instead of replaying the whole backlog (reuses since_id; no transport change)
+        _recent = t.recv()
+        since = _recent[-1].id if _recent else None
+    else:
+        since = args.since if args.since is not None else _resolve_since(t, identity, room)
     sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
@@ -892,6 +898,12 @@ def build_parser() -> argparse.ArgumentParser:
     s_watch = sub.add_parser("watch", help="stream new messages as they arrive")
     s_watch.add_argument("--poll", type=float, default=5.0, help="poll interval seconds")
     s_watch.add_argument("--since", help="start after this message id (skip backlog)")
+    s_watch.add_argument(
+        "--from-now",
+        action="store_true",
+        help="anchor to current head: stream only messages arriving after startup "
+             "(no backlog flood). Convenience for --since <head>; wins over --since.",
+    )
     s_watch.add_argument(
         "--addressed-to-me",
         action="store_true",
