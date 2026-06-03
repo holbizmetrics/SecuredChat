@@ -591,6 +591,14 @@ class GitBusTransport(LocalJsonlBus):
                     f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"
                 )
             if not self._has_remote():
+                # P10: "sent" must not silently imply delivery. With no remote,
+                # the message is committed LOCALLY ONLY and can reach no peer.
+                # Warn loudly (like _pull_rebase) rather than let "sent" lie.
+                print(
+                    f"securedchat: WARNING message {msg.id[:8]} committed LOCALLY "
+                    "ONLY — no remote configured, NOT published to any peer.",
+                    file=sys.stderr,
+                )
                 return
             result = None
             for _ in range(3):
