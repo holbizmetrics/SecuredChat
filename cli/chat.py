@@ -776,7 +776,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_recv.add_argument(
         "--exclude-self",
         action="store_true",
-        help="skip messages where from == this identity (suppress self-echo)",
+        help="skip messages where from == this identity. NOTE: self/same-identity "
+             "sibling messages are INCLUDED BY DEFAULT — pass this only to suppress "
+             "your own echo; omit it (or use `recv --id <prefix>`) to read sibling traffic.",
     )
     s_recv.add_argument(
         "--summary",
@@ -912,7 +914,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_watch.add_argument(
         "--exclude-self",
         action="store_true",
-        help="skip messages where from == this identity (suppress self-echo)",
+        help="skip messages where from == this identity. NOTE: self/same-identity "
+             "sibling messages are INCLUDED BY DEFAULT — pass this only to suppress "
+             "your own echo; omit it (or use `recv --id <prefix>`) to read sibling traffic.",
     )
     s_watch.add_argument("--json", action="store_true", help="output as JSONL")
     s_watch.add_argument(
