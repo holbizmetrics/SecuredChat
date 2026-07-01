@@ -783,6 +783,98 @@ def test_signing(root: Path) -> None:
             os.environ["SECUREDCHAT_HOME"] = old_home
 
 
+def test_addressing_and_owed(root: Path) -> None:
+    """The stale-token black-hole pass: bare-name matching, send-side liveness
+    warning, narrative-addressing lint, fresh-identity head-anchor, owed/orphans."""
+    print("\n[addressing + owed]")
+    import contextlib
+    import io
+    from argparse import Namespace
+
+    # --- pure helpers ---
+    check(chat._bare_of("windows-claude-ab5131a4") == "windows-claude", "bare_of strips token")
+    check(chat._bare_of("windows-claude") is None, "bare_of: no token -> None")
+    check(chat._addressed_to("windows-claude-ab5131a4", None), "addressed: broadcast matches")
+    check(chat._addressed_to("windows-claude-ab5131a4", "windows-claude-ab5131a4"),
+          "addressed: exact token matches")
+    check(chat._addressed_to("windows-claude-ab5131a4", "windows-claude"),
+          "addressed: bare name matches token identity")
+    check(not chat._addressed_to("windows-claude-ab5131a4", "windows-claude-deadbeef"),
+          "addressed: OTHER full token does NOT match")
+    check(chat._narrative_target("[linux -> WINDOWS desktop session] please run op-7")
+          == "WINDOWS", "narrative lint: '->' target detected")
+    check(chat._narrative_target("plain broadcast, nothing routed") is None,
+          "narrative lint: clean body -> None")
+
+    # --- file-bus fixture: three identities, one dead token ---
+    d = make_file_bus(root, "owedbus")
+    me = "termux-claude-11112222"
+    t_me = FileBusTransport(d, "r", me)
+    t_linux = FileBusTransport(d, "r", "linux-claude-33334444")
+    t_me.announce_presence()
+    t_linux.announce_presence()
+
+    send(t_linux, "linux-claude-33334444", "for you, bare", to="termux-claude")
+    m_replied = send(t_linux, "linux-claude-33334444", "answered one", to=me)
+    m_stale = send(t_linux, "linux-claude-33334444", "verdict to DEAD token",
+                   to="termux-claude-0beab011")
+    send(t_linux, "linux-claude-33334444", "broadcast noise")
+    reply = Message.new(from_=me, to="linux-claude-33334444", body="answered",
+                        reply_to=m_replied.id)
+    t_me.send(reply)
+
+    ns = Namespace(bus=str(d), room="r", identity=me, transport="file",
+                   include_broadcast=False, orphans=True, summary_width=80,
+                   json=False, days=7)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        chat.cmd_owed(ns)
+    o = out.getvalue()
+    check("1 owed" in o, "owed: exactly the unreplied bare-addressed message")
+    check("for you, bare" in o, "owed: bare-addressed body listed")
+    check("answered one" not in o, "owed: replied message not listed")
+    check("1 orphaned" in o, "orphans: dead-token message found")
+    check("bare matches YOU" in o and m_stale.id[:8] in o,
+          "orphans: dead token flagged as likely-mine with recovery id")
+
+    # --- send-side stale-target warning (warn-only) ---
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        chat._warn_stale_target(t_me, "termux-claude-0beab011")
+    check("no presence record" in err.getvalue()
+          and "--to termux-claude" in err.getvalue(),
+          "send guard: dead token warned + bare-name hint")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        chat._warn_stale_target(t_me, "linux-claude")
+    check(err.getvalue() == "", "send guard: fresh bare target -> silent")
+
+    # --- fresh-identity head-anchor on recv ---
+    old_cursor_dir = chat.CURSOR_DIR
+    chat.CURSOR_DIR = root / "owed-cursors"
+    try:
+        ns_r = Namespace(bus=str(d), room="r", identity="termux-claude-99990000",
+                         transport="file", id=None, since=None, addressed_to_me=False,
+                         exclude_self=False, summary=True, summary_width=80,
+                         json=False, ack=False, verify_from="off", verify_sig="off",
+                         from_start=False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            chat.cmd_recv(ns_r)
+        o = out.getvalue()
+        check("anchored at HEAD" in o and "0 pending" in o,
+              "fresh identity: anchored at HEAD, no backlog replay")
+        out = io.StringIO()
+        ns_r2 = Namespace(**{**vars(ns_r), "identity": "termux-claude-99991111",
+                             "from_start": True})
+        with contextlib.redirect_stdout(out):
+            chat.cmd_recv(ns_r2)
+        check("5 pending" in out.getvalue(),
+              "--from-start: full history replayed (5 msgs)")
+    finally:
+        chat.CURSOR_DIR = old_cursor_dir
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
     try:
@@ -805,6 +897,7 @@ def main() -> int:
         test_webrtc_loopback(root)
         test_send_lock_windows_permission_error(root)
         test_signing(root)
+        test_addressing_and_owed(root)
     finally:
         _rm(root)
     print()

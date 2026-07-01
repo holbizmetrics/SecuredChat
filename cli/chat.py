@@ -81,15 +81,31 @@ THE LOOP (in order)
   3. Reply:
        chat.py send "your text" --to <recipient> [--reply-to <ID>]
        (omit --to to broadcast to the whole room)
+       ALWAYS use --reply-to when answering: reply-threading is what lets
+       `owed` (below) tell answered from unanswered.
   4. Advance the cursor so you don't re-see handled messages:
        chat.py mark-seen <ID8-of-last-handled>     (id prefix ok; resolved to full id)
+  5. Periodically (and at boot): check your reply debt:
+       chat.py owed              # addressed to me, unreplied, last 7 days
+       chat.py owed --orphans    # + messages stranded on dead session tokens
+
+ADDRESSING (token vs bare name)
+  Your identity should be session-distinct (e.g. windows-claude-ab5131a4): the
+  token keys your cursor/presence/lease state. Peers ADDRESS you by the bare
+  name (windows-claude) — they can't track your random token. recv/watch
+  --addressed-to-me matches broadcast, your exact token, AND your bare name;
+  a DIFFERENT full token never matches. send warns (never blocks) when your
+  --to target has no fresh presence — a message to a dead/rotated token
+  otherwise sits unread until someone snapshots the room.
 
 CURSOR MODEL
   recv --since <id> (and the saved per-(identity,room) cursor under
   ~/.config/securedchat/cursors/) return only messages AFTER <id>. The cursor is
   scoped per identity AND room, so concurrent sessions on one machine don't
   clobber each other's place. Ids match by PREFIX. A stale/unknown cursor returns
-  NOTHING with a warning — it never replays the whole backlog.
+  NOTHING with a warning — it never replays the whole backlog. A FRESH identity
+  (no cursor at all) anchors at HEAD, loudly, instead of replaying the room's
+  history as pending; `recv --from-start` replays everything.
 
 OUTPUT FOR PROGRAMS
   --json (send/recv) emits one JSON object per line:
@@ -212,6 +228,65 @@ def _resolve_since(t: "GitBusTransport", identity: str, room: str) -> str | None
         _write_last_seen(identity, room, legacy)  # complete the migration, scoped
         return legacy
     return None
+
+
+def _bare_of(identity: str) -> str | None:
+    """The bare addressing handle of a session-token identity
+    ('windows-claude-ab5131a4' -> 'windows-claude'), or None when the identity
+    carries no token suffix."""
+    m = re.match(r"^(.+)-[0-9a-f]{8}$", identity)
+    return m.group(1) if m else None
+
+
+def _addressed_to(identity: str, to: str | None) -> bool:
+    """Does a message's `to` target this identity? True for broadcast (None),
+    exact match, or bare-name addressing: 'windows-claude' matches identity
+    'windows-claude-ab5131a4'. Convention (BUS): the token keys state, the bare
+    name addresses — peers cannot track a session's random token. A DIFFERENT
+    full token never matches (concurrent sessions stay distinct)."""
+    if to is None or to == identity:
+        return True
+    return identity.startswith(to + "-")
+
+
+def _narrative_target(body: str) -> str | None:
+    """Detect body-routed messages: a '-> NAME' / '→ NAME' in the first ~120
+    chars (the '[linux -> WINDOWS DESKTOP session]' convention). Routing that
+    lives only in prose is invisible to --addressed-to-me / wake-monitors —
+    the recorded miss class this lint exists for. Returns the apparent target
+    or None."""
+    m = re.search(r"(?:->|→)\s*([A-Za-z][\w-]{2,40})", body[:120])
+    return m.group(1) if m else None
+
+
+_PRESENCE_STALE_S = 3600.0  # advisory send-side staleness window
+
+
+def _warn_stale_target(t, to: str) -> None:
+    """The stale-token black-hole guard (warn-only, never blocks a send).
+
+    A message addressed to a dead session token sits unread until someone
+    manually snapshots the room — a reply once sat 5h while a wrong verdict
+    was banked on its absence. Warn when the target has no presence record or
+    a stale one; when the target looks token-suffixed, suggest the bare name.
+    Bare targets are checked against every session sharing that bare prefix.
+    """
+    try:
+        rows = t.read_presence()
+    except Exception:
+        return  # advisory only — presence trouble must never break send
+    ages = [r["age"] for r in rows
+            if r["identity"] == to or r["identity"].startswith(to + "-")]
+    bare = _bare_of(to)
+    hint = f" — if that session ended, address the bare name: --to {bare}" if bare else ""
+    if not ages:
+        print(f"securedchat: WARNING no presence record for target {to!r}; it may be "
+              f"a dead/rotated session token and nobody may ever read this{hint}",
+              file=sys.stderr)
+    elif min(ages) > _PRESENCE_STALE_S:
+        print(f"securedchat: WARNING target {to!r} last seen {_fmt_age(min(ages))} ago; "
+              f"delivery will sit until that session returns{hint}",
+              file=sys.stderr)
 
 
 def _verify_from(t: "GitBusTransport", msgs: list, *, strict: bool) -> list:
@@ -338,6 +413,15 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not body.strip():
         sys.exit("refusing to send empty message")
     t, _, identity = _build_transport(args)
+    if args.to:
+        _warn_stale_target(t, args.to)
+    else:
+        _tgt = _narrative_target(body)
+        if _tgt:
+            print(f"securedchat: WARNING body names a target ('-> {_tgt}') but the "
+                  f"envelope is broadcast — wake-monitors keyed on identity may not "
+                  f"rank it as for-them; consider resending with --to <identity>",
+                  file=sys.stderr)
     msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=args.reply_to)
     _maybe_sign(identity, msg, enabled=not args.no_sign)
     t.send(msg)
@@ -375,7 +459,20 @@ def cmd_recv(args: argparse.Namespace) -> None:
         print(m.body)
         return
     since = args.since if args.since is not None else _resolve_since(t, identity, room)
+    fresh_anchor = (args.since is None and since is None
+                    and not getattr(args, "from_start", False))
     msgs = t.recv(since_id=since)
+    if fresh_anchor and msgs:
+        # Fresh identity (no cursor anywhere): anchor at HEAD instead of replaying
+        # the room's whole history as "pending" (the cold-cursor boot noise).
+        # Loud, never silent (R1 principle kept): count + replay path printed.
+        head = msgs[-1].id
+        _write_last_seen(identity, room, head)
+        print(f"securedchat: fresh identity {identity!r} — cursor anchored at HEAD "
+              f"({head[:8]}); {len(msgs)} historical message(s) skipped "
+              f"(replay: --from-start or --since <id>)",
+              file=(sys.stderr if args.json else sys.stdout))
+        msgs = []
     if not t.last_pull_ok:
         # R2: surface staleness on the SAME stream as the result (stdout for
         # human/monitor output; stderr under --json to keep the stream parseable)
@@ -384,7 +481,7 @@ def cmd_recv(args: argparse.Namespace) -> None:
               "local-only and may be incomplete.",
               file=(sys.stderr if args.json else sys.stdout))
     if args.addressed_to_me:
-        msgs = [m for m in msgs if m.to in (None, identity)]
+        msgs = [m for m in msgs if _addressed_to(identity, m.to)]
     if args.exclude_self:
         msgs = [m for m in msgs if m.from_ != identity]
     if args.verify_from != "off":
@@ -396,7 +493,7 @@ def cmd_recv(args: argparse.Namespace) -> None:
         _prior = {m.reply_to for m in t.recv(since_id=None)
                   if m.kind == "ack" and m.from_ == identity}
         _to_ack = [m for m in msgs if m.kind != "ack" and m.from_ != identity
-                   and m.to in (None, identity) and m.id not in _prior]
+                   and _addressed_to(identity, m.to) and m.id not in _prior]
         for _m in _to_ack:
             _emit_ack(t, identity, _m)
         if _to_ack:
@@ -437,6 +534,72 @@ def cmd_mark_seen(args: argparse.Namespace) -> None:
     print(f"last-seen-id: {full_id} ({_cursor_file(identity, room)})")
 
 
+_OWED_SKIP_KINDS = {"ack", "announce", "presence"}
+
+
+def cmd_owed(args: argparse.Namespace) -> None:
+    """Reply-owed backlog scan, mechanized.
+
+    Default: inbound messages addressed to me (exact token or bare name) that
+    none of my messages reply to. --orphans adds the room-wide stale-token
+    sweep: direct-addressed messages whose target has NO fresh presence and
+    that nobody has answered — the class where a reply sat 5h unread because
+    it was addressed to a rotated session token and no cursor ever consumed it.
+    """
+    t, room, identity = _build_transport(args)
+    all_msgs = t.recv(since_id=None)
+    if not t.last_pull_ok:
+        print("securedchat: STALE — pull failed (offline/conflict); results are "
+              "local-only and may be incomplete.",
+              file=(sys.stderr if args.json else sys.stdout))
+    # "Mine" at bare level: a message addressed to bare 'windows-claude' that
+    # ANY windows-claude-* session already answered is not owed — otherwise a
+    # fresh token inherits the whole room history as debt (live finding on
+    # first real run: 105 false-owed).
+    my_bare = _bare_of(identity) or identity
+    _mine = lambda frm: frm == identity or (_bare_of(frm) or frm) == my_bare
+    my_replies = {m.reply_to for m in all_msgs if _mine(m.from_) and m.reply_to}
+    # Age window: pre-threading-era messages can never be cleared by reply
+    # linkage (replies then weren't sent with --reply-to), so all-time scans
+    # drown in unclearable history. Default to recent debt; --days 0 lifts it.
+    horizon = time.time() - args.days * 86400 if args.days > 0 else 0.0
+    owed = [m for m in all_msgs
+            if not _mine(m.from_)
+            and m.kind not in _OWED_SKIP_KINDS
+            and (m.to is not None or args.include_broadcast)
+            and _addressed_to(identity, m.to)
+            and m.id not in my_replies
+            and m.ts >= horizon]
+    if args.json and not args.orphans:
+        for m in owed:
+            print(m.to_jsonl())
+        return
+    window = f"last {args.days}d; --days 0 for all-time" if args.days > 0 else "all-time"
+    print(f"{len(owed)} owed (addressed to me, no reply from me; {window})")
+    for m in owed:
+        print(_summary_line(m, args.summary_width))
+    if args.orphans:
+        try:
+            fresh = {r["identity"] for r in t.read_presence()
+                     if r["age"] <= _PRESENCE_STALE_S}
+        except Exception:
+            fresh = set()
+        answered = {m.reply_to for m in all_msgs if m.reply_to}
+        orphans = [m for m in all_msgs
+                   if m.to
+                   and m.kind not in _OWED_SKIP_KINDS
+                   and m.id not in answered
+                   and m.ts >= horizon
+                   and not any(f == m.to or f.startswith(m.to + "-") for f in fresh)]
+        print(f"{len(orphans)} orphaned (addressed to an identity with no fresh "
+              f"presence, unanswered by anyone)")
+        for m in orphans:
+            tag = ""
+            if (_bare_of(m.to) or m.to) == my_bare and m.to != identity:
+                tag = f"  << bare matches YOU — stale token? read: recv --id {m.id[:8]}"
+            print(_summary_line(m, args.summary_width) + tag)
+
+
 def cmd_watch(args: argparse.Namespace) -> None:
     t, room, identity = _build_transport(args)
     if args.from_now:
@@ -449,7 +612,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
     sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
-            if args.addressed_to_me and m.to not in (None, identity):
+            if args.addressed_to_me and not _addressed_to(identity, m.to):
                 continue
             if args.exclude_self and m.from_ == identity:
                 continue
@@ -507,9 +670,19 @@ def cmd_presence(args: argparse.Namespace) -> None:
     if not rows:
         print("no presence records")
         return
+    # Presence proves the heartbeat process is alive, NOT that an agent is
+    # reading. Show last actual message age next to it so online-but-idle is
+    # visible at a glance (fresh beat + hour-old last message = nobody home).
+    last_msg: dict[str, float] = {}
+    for m in t.recv(since_id=None):
+        last_msg[m.from_] = max(m.ts, last_msg.get(m.from_, 0.0))
+    now = time.time()
     for r in rows:
         status = "online" if r["age"] <= args.window else "stale "
-        print(f"{status}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago")
+        ts = last_msg.get(r["identity"])
+        attn = f"last msg {_fmt_age(now - ts)} ago" if ts else "no messages yet"
+        print(f"{status}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
+              f" · {attn}")
 
 
 def cmd_claim(args: argparse.Namespace) -> None:
@@ -793,6 +966,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s_recv.add_argument("--json", action="store_true", help="output as JSONL")
     s_recv.add_argument(
+        "--from-start",
+        action="store_true",
+        help="fresh identities (no cursor) normally anchor at HEAD and skip the "
+             "historical backlog (loudly, with a count); pass this to replay the "
+             "full room history instead",
+    )
+    s_recv.add_argument(
         "--ack",
         action="store_true",
         help="acknowledge each consumed message addressed to me (emit kind=ack receipts so "
@@ -820,6 +1000,36 @@ def build_parser() -> argparse.ArgumentParser:
              f"strict (once all keys pinned). THIS is real authentication of 'from'.",
     )
     s_recv.set_defaults(func=cmd_recv)
+
+    s_owed = sub.add_parser(
+        "owed",
+        help="reply-owed backlog: messages addressed to me (token or bare) that "
+             "I never replied to; --orphans adds the room-wide stale-token sweep",
+    )
+    s_owed.add_argument(
+        "--include-broadcast",
+        action="store_true",
+        help="also count broadcast messages as owed (default: direct-addressed only)",
+    )
+    s_owed.add_argument(
+        "--orphans",
+        action="store_true",
+        help="also list direct-addressed messages whose target has no fresh "
+             "presence and that nobody answered (catches replies sent to a "
+             "dead/rotated session token)",
+    )
+    s_owed.add_argument(
+        "--days", type=int, default=7,
+        help="only messages from the last N days (default 7; 0 = all-time — "
+             "noisy: pre-threading-era messages can never be cleared by replies)",
+    )
+    s_owed.add_argument(
+        "--summary-width", type=int, default=80,
+        help="body preview width (default 80)",
+    )
+    s_owed.add_argument("--json", action="store_true",
+                        help="owed list as JSONL (ignored with --orphans)")
+    s_owed.set_defaults(func=cmd_owed)
 
     s_mark = sub.add_parser(
         "mark-seen",
