@@ -277,6 +277,18 @@ def _warn_stale_target(t, to: str) -> None:
         return  # advisory only — presence trouble must never break send
     ages = [r["age"] for r in rows
             if r["identity"] == to or r["identity"].startswith(to + "-")]
+    # A session can be ACTIVE without a heartbeat (beat process died, agent still
+    # messaging) — count actual message recency as liveness too, else this warns
+    # "last seen 115h ago" about a peer that answered 30 minutes ago (peer field
+    # report, 2026-07-02). Freshest of either signal wins.
+    try:
+        _now = time.time()
+        _msg_ages = [_now - m.ts for m in t.recv(since_id=None)
+                     if m.from_ == to or m.from_.startswith(to + "-")]
+        if _msg_ages:
+            ages.append(max(0.0, min(_msg_ages)))
+    except Exception:
+        pass
     bare = _bare_of(to)
     hint = f" — if that session ended, address the bare name: --to {bare}" if bare else ""
     if not ages:
@@ -422,7 +434,20 @@ def cmd_send(args: argparse.Namespace) -> None:
                   f"envelope is broadcast — wake-monitors keyed on identity may not "
                   f"rank it as for-them; consider resending with --to <identity>",
                   file=sys.stderr)
-    msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=args.reply_to)
+    reply_to = args.reply_to
+    if reply_to:
+        # Resolve a prefix to the FULL id at send time (wire hygiene): threading and
+        # `owed` clear by id, and a prefix reply_to on the wire made a real reply look
+        # unanswered. Found by a peer session field-testing `owed` (2026-07-02).
+        _matches = [m.id for m in t.recv(since_id=None) if m.id.startswith(reply_to)]
+        if len(_matches) == 1:
+            reply_to = _matches[0]
+        elif len(_matches) > 1:
+            sys.exit(f"ambiguous --reply-to prefix {args.reply_to!r} matches {len(_matches)} messages")
+        else:
+            print(f"securedchat: WARNING --reply-to {args.reply_to!r} matches no known message id "
+                  f"(kept as given - threading/owed may not link)", file=sys.stderr)
+    msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=reply_to)
     _maybe_sign(identity, msg, enabled=not args.no_sign)
     t.send(msg)
     if args.json:
@@ -559,6 +584,9 @@ def cmd_owed(args: argparse.Namespace) -> None:
     my_bare = _bare_of(identity) or identity
     _mine = lambda frm: frm == identity or (_bare_of(frm) or frm) == my_bare
     my_replies = {m.reply_to for m in all_msgs if _mine(m.from_) and m.reply_to}
+    # Historical reply_to values may be PREFIXES (send only resolves them to full ids
+    # since 2026-07-02) - clear by prefix so old threaded replies still count.
+    _cleared = lambda mid: any(mid.startswith(rt) for rt in my_replies)
     # Age window: pre-threading-era messages can never be cleared by reply
     # linkage (replies then weren't sent with --reply-to), so all-time scans
     # drown in unclearable history. Default to recent debt; --days 0 lifts it.
@@ -568,7 +596,7 @@ def cmd_owed(args: argparse.Namespace) -> None:
             and m.kind not in _OWED_SKIP_KINDS
             and (m.to is not None or args.include_broadcast)
             and _addressed_to(identity, m.to)
-            and m.id not in my_replies
+            and not _cleared(m.id)
             and m.ts >= horizon]
     if args.json and not args.orphans:
         for m in owed:
@@ -585,10 +613,11 @@ def cmd_owed(args: argparse.Namespace) -> None:
         except Exception:
             fresh = set()
         answered = {m.reply_to for m in all_msgs if m.reply_to}
+        _answered = lambda mid: any(mid.startswith(rt) for rt in answered)
         orphans = [m for m in all_msgs
                    if m.to
                    and m.kind not in _OWED_SKIP_KINDS
-                   and m.id not in answered
+                   and not _answered(m.id)
                    and m.ts >= horizon
                    and not any(f == m.to or f.startswith(m.to + "-") for f in fresh)]
         print(f"{len(orphans)} orphaned (addressed to an identity with no fresh "

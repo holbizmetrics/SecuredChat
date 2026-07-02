@@ -874,6 +874,37 @@ def test_addressing_and_owed(root: Path) -> None:
     finally:
         chat.CURSOR_DIR = old_cursor_dir
 
+    # --- peer field-report fixes (2026-07-02): prefix reply_to + message-recency liveness ---
+    # 1) historical PREFIX reply_to must clear owed (wire data from before send resolved prefixes)
+    m_pref = send(t_linux, "linux-claude-33334444", "answer me threaded", to=me)
+    t_me.send(Message.new(from_=me, to="linux-claude-33334444", body="threaded reply",
+                          reply_to=m_pref.id[:8]))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        chat.cmd_owed(ns)
+    check("answer me threaded" not in out.getvalue(),
+          "owed: PREFIX reply_to clears the debt (historical wire data)")
+
+    # 2) send resolves --reply-to prefixes to the FULL id on the wire
+    m_tgt = send(t_linux, "linux-claude-33334444", "resolve my prefix", to=me)
+    ns_s = Namespace(bus=str(d), room="r", identity=me, transport="file",
+                     body="resolved reply", to="linux-claude-33334444",
+                     kind="msg", reply_to=m_tgt.id[:8], json=False, no_sign=True)
+    with contextlib.redirect_stderr(io.StringIO()):
+        chat.cmd_send(ns_s)
+    stored = [m for m in t_me.recv(since_id=None) if m.body == "resolved reply"]
+    check(bool(stored) and stored[0].reply_to == m_tgt.id,
+          "send: --reply-to prefix resolved to FULL id on the wire")
+
+    # 3) a peer that MESSAGES without a heartbeat is alive - no false stale warning
+    t_quiet = FileBusTransport(d, "r", "quiet-claude-77770000")
+    send(t_quiet, "quiet-claude-77770000", "i message but never beat")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        chat._warn_stale_target(t_me, "quiet-claude")
+    check(err.getvalue() == "",
+          "send guard: fresh MESSAGE counts as liveness (no false last-seen warning)")
+
 
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
