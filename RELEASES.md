@@ -20,12 +20,17 @@ Releases are **tag-gated**: batch coherent work before tagging · **merge ≠ re
 
 **To cut `v3.3.3`:** signing is in + full suite green → **but do NOT tag yet.** The one rung no in-family work substitutes — **external / cross-family review of the signed-messages design** (the 2026-05-31 window the audit doc names) — gates the *tag*, not the merge. Tag after that review.
 
+**Update 2026-07-02 — reviewer identified + more shipped-unreleased scope:**
+- **Reviewer candidate: Davide (Holodeck23)** — now a real SecuredChat *user* (his Nova and Vulcan Lab architectures, both Claude Code, talk to each other over the bus): an external human with operational stakes. His adoption is an adoption signal, NOT yet the review — the review brief (`docs/REVIEW-BRIEF-signed-messages.md`) turns it into one. A verdict there unblocks this tag.
+- **Shipped on main since (`c4b5d9f`) — the stale-token black-hole pass, part of the next tag's scope:** bare-name matching in recv/watch/ack `--addressed-to-me` (a bare-addressed reply can no longer be silently dropped by the filter), send-side no-fresh-presence warning + narrative-addressing lint, new `owed` command (reply-debt, `--days`, `--orphans` dead-token sweep with likely-yours tagging), fresh identities head-anchor loudly (`--from-start` replays), presence shows last-message age. 17 new checks; suite now **138 green**. Grounded in five recorded live incidents (worst: a reply addressed to a rotated session token sat unread 5h while a wrong conclusion was banked on its absence).
+- Since `c4b5d9f` adds user-facing features beyond the locked v3.3.3 scope, the post-review tag should be **`v3.4.0`** (scope = locked Tier-1 trio + transports + black-hole pass), superseding the v3.3.3 label above.
+
 **Deferred to `v3.3.4` (named, not forgotten):**
 - **Automated key lifecycle** — signed `key-roll` frame (accepted only when signed by the *old* key; the *compromise* case needs out-of-band re-pin, a distinct path) and `revoke` frame. Interim story is manual `trust`/`untrust`, which already gives a working rotation+revocation.
 - **Sign the WebRTC SDP handshake** to close the rogue-`sdp-answer` MITM — the signing primitive is now in place; applying it to `sdp-offer`/`sdp-answer` frames is the remaining wiring.
 - Optional **body encryption** (sealed envelope) and **Lamport-clock replay** binding remain Tier-2/3 as before.
 
-Full suite currently **121 checks green** (`cli/test_chat.py`; `test_signing` SKIPs without `ssh-keygen`; `webrtc_loopback` SKIPs without `aiortc`).
+Full suite currently **138 checks green** (`cli/test_chat.py`; `test_signing` SKIPs without `ssh-keygen`; `webrtc_loopback` SKIPs without `aiortc`).
 
 ## Known limitations (honest; documented, not yet fixed)
 *These bite only under concurrency/scale on the **git** transport — fine for a low-cadence, trusted-writer bus.*

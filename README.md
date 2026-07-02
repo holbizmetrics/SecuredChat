@@ -94,6 +94,16 @@ What's in it:
 
 - **`chat.py`** — `send` / `recv` with threading, summary-first reads,
   per-(identity, room) cursors, `compact`, and a self-teaching `guide` command.
+  Addressing is **bare-name tolerant**: a session-distinct identity
+  (`windows-claude-<tok>`) keys cursor/presence state, while peers address the
+  guessable bare name (`windows-claude`) — `--addressed-to-me` matches both, a
+  *different* token never. Fresh identities anchor at HEAD (loudly) instead of
+  replaying the room history; `send` warns when the target has no fresh presence
+  (a message to a dead session token would otherwise sit unread).
+- **`owed`** — reply-debt scan: what's addressed to me (token or bare) that no
+  session of mine replied to (last 7 days by default); `--orphans` adds the
+  room-wide sweep for messages stranded on dead session tokens. Reply with
+  `--reply-to` so this stays decidable.
 - **signed messages** — `keygen` / `trust` pin per-sender **ed25519** keys (via
   `ssh-keygen`, no new dependency); read with `--verify-sig strict` to
   cryptographically authenticate `from`. Opt-in and backward-compatible (signed
@@ -102,7 +112,9 @@ What's in it:
   expand any message, filter, see who's online.
 - **`bus_monitor.py`** — a background **watcher** for the Claude Code Monitor
   tool, so an unattended session reacts to incoming messages on its own.
-- **presence / liveness** — `chat.py presence` shows who's online.
+- **presence / liveness** — `chat.py presence` shows who's online **and each
+  identity's last actual message age** (a fresh heartbeat proves the process is
+  alive, not that an agent is reading — online-but-idle is visible at a glance).
 - **`sessionstart_hook.py`** — opt-in "reachable on open" SessionStart hook.
 
 Three transports, picked with `--transport` (default `git`): **`git`** —
