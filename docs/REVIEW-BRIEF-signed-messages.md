@@ -23,6 +23,11 @@ git push access (i.e. the transport itself proves nothing about authorship).
 
 ## The questions (attack these, in order of value)
 
+*Do what fits your depth — this brief serves two reviewer profiles. The **decidable
+checks below + Q4/Q5 + any usability finding from real Nova↔Vulcan use** are a full,
+valuable review on their own. Q1–Q3 are code-reading questions; skip them freely —
+they are also being put to independent cross-family AI reviewers in parallel.*
+
 1. **Signature scope:** read `signing.py` — is anything an attacker cares about
    *outside* the signed tuple? (e.g. can a signed message be *replayed* into a
    different room/bus, or re-sent later, and still verify? There is deliberately no
