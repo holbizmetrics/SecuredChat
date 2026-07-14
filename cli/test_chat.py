@@ -747,8 +747,14 @@ def test_signing(root: Path) -> None:
         ms = Message.from_jsonl(m.to_jsonl()); ms.from_ = "bob"
         check(signing.verify(ms).status is not signing.SigStatus.VERIFIED,
               "from-spoof not VERIFIED (from is inside the signed payload)")
-        check(signing.verify(Message.new("alice", None, "x")).status is signing.SigStatus.UNSIGNED,
-              "no signature -> UNSIGNED")
+        # alice is pinned here, so an unsigned message from her is a downgrade/
+        # strip attack -> MISSING_EXPECTED_SIG (was UNSIGNED before the F5 fix).
+        check(signing.verify(Message.new("alice", None, "x")).status
+              is signing.SigStatus.MISSING_EXPECTED_SIG,
+              "F5: unsigned from PINNED principal -> MISSING_EXPECTED_SIG")
+        check(signing.verify(Message.new("stranger", None, "x")).status
+              is signing.SigStatus.UNSIGNED,
+              "unsigned from UNPINNED principal -> UNSIGNED (benign)")
 
         # --- allowed_signers injection / validation ---
         rejected = 0
@@ -776,6 +782,98 @@ def test_signing(root: Path) -> None:
         check(signing.remove_pin("alice") == 1, "remove_pin alice -> 1 removed")
         check(signing.verify(m).status is signing.SigStatus.UNKNOWN_SIGNER,
               "post-revoke -> UNKNOWN_SIGNER")
+    finally:
+        if old_home is None:
+            os.environ.pop("SECUREDCHAT_HOME", None)
+        else:
+            os.environ["SECUREDCHAT_HOME"] = old_home
+
+
+def test_signing_hardening(root: Path) -> None:
+    """Regression tests for the 2026-07-14 cross-family review fixes. Each check
+    FAILS on the pre-fix code and PASSES after (NULL-CONTROL-AT-BIRTH for a
+    security fix). Most need no ssh-keygen — the guards return before the
+    subprocess — so they run everywhere. Fake shape-valid pubkey lines are enough
+    to exercise the pin/verify branches that never reach ssh-keygen."""
+    print("test_signing_hardening (cross-family review fixes: F5/F3/F6/B3/canon/NUL)")
+    home = root / "sig_hard_home"
+    old_home = os.environ.get("SECUREDCHAT_HOME")
+    os.environ["SECUREDCHAT_HOME"] = str(home)
+    FK = "AAAAC3NzaC1lZDI1NTE5AAAAI"  # ed25519 blob prefix; append distinct tails
+    try:
+        # --- F5 downgrade/strip: unsigned from a PINNED principal ---
+        signing.add_pin("alice", f"ssh-ed25519 {FK}aliceKEYaa alice@x")
+        um = Message.new("alice", None, "no sig")
+        check(signing.verify(um).status is signing.SigStatus.MISSING_EXPECTED_SIG,
+              "F5: unsigned from pinned -> MISSING_EXPECTED_SIG (pre-fix returned UNSIGNED)")
+        check(signing.verify(Message.new("stranger", None, "x")).status
+              is signing.SigStatus.UNSIGNED, "unsigned from unpinned -> UNSIGNED (benign)")
+        check(chat._verify_sig([um], policy="strict") == [],
+              "F5 policy: strict DROPS a missing-expected-sig (fail-closed)")
+        check(len(chat._verify_sig([um], policy="warn")) == 1,
+              "F5 policy: warn KEEPS it but flags ALERT (distinct from benign unsigned)")
+
+        # --- F3 selective revoke: drop ONE key, keep the principal's others ---
+        signing.add_pin("bob", f"ssh-ed25519 {FK}bobKEYone bob@1")
+        signing.add_pin("bob", f"ssh-ed25519 {FK}bobKEYtwo bob@2")
+        check(sum(1 for p in signing.list_pins() if p[0] == "bob") == 2, "bob has 2 pinned keys")
+        check(signing.remove_pin("bob", key=f"ssh-ed25519 {FK}bobKEYone bob@1") == 1,
+              "F3: remove_pin(key=...) drops exactly one")
+        check(signing.is_pinned("bob") and sum(1 for p in signing.list_pins() if p[0] == "bob") == 1,
+              "F3: bob still pinned via the OTHER key (staggered roll now possible)")
+        check(signing.remove_pin("bob") == 1 and not signing.is_pinned("bob"),
+              "F3: remove_pin(no key) still wipes all (back-compat)")
+
+        # --- GPT B3: unknown sig_alg on a signed message -> BAD_SIG (pre-ssh-keygen) ---
+        signing.add_pin("carol", f"ssh-ed25519 {FK}carolKEYc carol@x")
+        sm = Message.new("carol", None, "x")
+        sm.sig = "-----BEGIN SSH SIGNATURE-----\nx\n-----END SSH SIGNATURE-----\n"
+        sm.sig_alg = "evil"
+        check(signing.verify(sm).status is signing.SigStatus.BAD_SIG,
+              "B3: unknown sig_alg -> BAD_SIG (mutable-metadata guard)")
+
+        # --- F6: oversized signature rejected before disk/OOM ---
+        big = Message.new("carol", None, "x")
+        big.sig = "A" * (signing._MAX_SIG_BYTES + 1); big.sig_alg = "ssh"
+        check(signing.verify(big).status is signing.SigStatus.BAD_SIG,
+              "F6: oversized signature -> BAD_SIG (no OOM/temp-file DoS)")
+
+        # --- canonicalisation crash-harden: NaN payload -> ERROR, not a crash ---
+        nan_m = Message.new("carol", None, "x")
+        nan_m.sig = "-----BEGIN SSH SIGNATURE-----\nx\n"; nan_m.sig_alg = "ssh"
+        nan_m.ts = float("nan")
+        check(signing.verify(nan_m).status is signing.SigStatus.ERROR,
+              "canon: non-finite payload -> ERROR (allow_nan=False, caught)")
+
+        # --- GPT trust-store integrity: reject embedded control char in a pin ---
+        nul_rejected = False
+        try:
+            signing.add_pin("dave", f"ssh-ed25519 {FK}daveKEYd comment\x00evil")
+        except signing.SigningError:
+            nul_rejected = True
+        check(nul_rejected, "trust-store: add_pin rejects embedded control char (NUL)")
+
+        # --- GPT B4: a FAILED keygen(overwrite) must not destroy the working key ---
+        if shutil.which(signing._ssh_keygen()):
+            kp, _ = signing.keygen("erin")
+            before = kp.read_bytes()
+            os.environ["SECUREDCHAT_SSH_KEYGEN"] = "securedchat-no-such-keygen-xyz"
+            try:
+                raised = False
+                try:
+                    signing.keygen("erin", overwrite=True)
+                except signing.SigningError:
+                    raised = True
+                check(raised, "keygen: failed regen raises SigningError")
+                check(kp.exists() and kp.read_bytes() == before,
+                      "B4: failed keygen(overwrite) PRESERVES the existing key")
+            finally:
+                os.environ["SECUREDCHAT_SSH_KEYGEN"] = "ssh-keygen"
+            signing.keygen("erin", overwrite=True)
+            check(not kp.with_name(kp.name + ".new").exists(),
+                  "keygen(overwrite) leaves no .new temp on success")
+        else:
+            print("  SKIP  keygen-overwrite preservation (no ssh-keygen)")
     finally:
         if old_home is None:
             os.environ.pop("SECUREDCHAT_HOME", None)
@@ -928,6 +1026,7 @@ def main() -> int:
         test_webrtc_loopback(root)
         test_send_lock_windows_permission_error(root)
         test_signing(root)
+        test_signing_hardening(root)
         test_addressing_and_owed(root)
     finally:
         _rm(root)

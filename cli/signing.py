@@ -62,8 +62,23 @@ class SigStatus(Enum):
     VERIFIED = "verified"          # signed by the key pinned for this `from`
     BAD_SIG = "bad-signature"      # a key is pinned but the signature doesn't match (tamper/forgery)
     UNKNOWN_SIGNER = "unknown-signer"  # no pinned key for this `from` (or none verifies)
-    UNSIGNED = "unsigned"          # no signature present
+    UNSIGNED = "unsigned"          # no signature present, and no key pinned for this `from`
+    MISSING_EXPECTED_SIG = "missing-expected-signature"  # no signature BUT a key is pinned for this `from` -> downgrade/strip attack
     ERROR = "error"                # ssh-keygen missing / unexpected failure
+
+
+# A signature blob larger than this is rejected before we touch the filesystem.
+# A real armored SSH signature over a small payload is well under 4 KiB; the cap
+# stops a hostile multi-GB `sig` from OOMing the process or filling /tmp (the
+# cross-family F6 finding — defence-in-depth; the primary fix is an ingest-level
+# message-size cap, out of this module's scope).
+_MAX_SIG_BYTES = 16 * 1024
+
+# Signature-scheme tags this build understands. `sig_alg` is NOT in the signed
+# payload (a wire-format change would break every existing signature), so verify
+# must reject an unknown tag rather than trust it — otherwise a future
+# alg-dispatch could be steered by unauthenticated metadata (GPT B3).
+_KNOWN_SIG_ALGS = (None, "", SIG_ALG)
 
 
 @dataclass
@@ -124,8 +139,13 @@ def canonical_payload(msg) -> bytes:
         "body": msg.body,
         "reply_to": msg.reply_to,
     }
+    # allow_nan=False: reject NaN/Infinity rather than emit the non-standard
+    # `NaN`/`Infinity` tokens a strict JSON parser would refuse (parser
+    # disagreement across sign/verify). Byte-identical for all finite/valid
+    # payloads, so NOT a wire-format change; verify() catches the ValueError and
+    # returns ERROR instead of crashing on a hostile message.
     return json.dumps(
-        d, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        d, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
 
 
@@ -141,20 +161,36 @@ def keygen(identity: str, overwrite: bool = False) -> tuple[Path, str]:
     kp.parent.mkdir(parents=True, exist_ok=True)
     if kp.exists() and not overwrite:
         return kp, pub_path(identity).read_text(encoding="utf-8").strip()
-    if kp.exists():
-        kp.unlink()
-        pub_path(identity).unlink(missing_ok=True)
-    proc = subprocess.run(
-        [_ssh_keygen(), "-t", "ed25519", "-f", str(kp), "-N", "",
-         "-C", f"{identity}@securedchat", "-q"],
-        capture_output=True, text=True,
-    )
+
+    # Generate into a temp path FIRST, then atomically swap in. A failed
+    # ssh-keygen must NOT destroy the existing working key (GPT B4 escalation:
+    # the old code unlinked the key before regenerating, so a regen failure left
+    # the identity with no key at all).
+    tmp = kp.with_name(kp.name + ".new")
+    tmp_pub = tmp.with_name(tmp.name + ".pub")
+    for stale in (tmp, tmp_pub):
+        stale.unlink(missing_ok=True)
+    try:
+        proc = subprocess.run(
+            [_ssh_keygen(), "-t", "ed25519", "-f", str(tmp), "-N", "",
+             "-C", f"{identity}@securedchat", "-q"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        tmp.unlink(missing_ok=True)
+        tmp_pub.unlink(missing_ok=True)
+        raise SigningError("ssh-keygen not found (keygen needs OpenSSH >= 8.2)")
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        tmp_pub.unlink(missing_ok=True)
         raise SigningError(f"keygen failed: {proc.stderr.strip() or proc.stdout.strip()}")
     try:
-        os.chmod(kp, 0o600)  # best-effort; no-op semantics on Windows
+        os.chmod(tmp, 0o600)  # best-effort; no-op semantics on Windows
     except OSError:
         pass
+    # Only now that the new key exists, replace the old one.
+    os.replace(tmp, kp)
+    os.replace(tmp_pub, pub_path(identity))
     return kp, pub_path(identity).read_text(encoding="utf-8").strip()
 
 
@@ -184,12 +220,40 @@ def verify(msg, signers: Path | None = None) -> VerifyResult:
     policy (off/warn/strict) decides what to do with each status."""
     sig = getattr(msg, "sig", None)
     if not sig:
+        # A missing signature is benign ONLY if no key is pinned for this
+        # principal. If a key IS pinned, an unsigned message claiming that
+        # `from_` is a downgrade/strip attack — surface it distinctly so `warn`
+        # policy flags it instead of treating it as an ordinary unsigned message
+        # (the 3/3 cross-family release-blocker F5/B1). `is_pinned` reads the same
+        # allowed_signers file the signed path checks against.
+        if is_pinned(getattr(msg, "from_", "") or ""):
+            return VerifyResult(SigStatus.MISSING_EXPECTED_SIG,
+                                f"{msg.from_!r} is pinned but the message is unsigned")
         return VerifyResult(SigStatus.UNSIGNED)
+
+    # `sig_alg` is unauthenticated metadata (deliberately not in the signed
+    # payload — binding it is a wire-format change, tracked as a tag-blocker).
+    # Reject an unknown tag rather than let it steer future alg-dispatch (GPT B3).
+    if getattr(msg, "sig_alg", None) not in _KNOWN_SIG_ALGS:
+        return VerifyResult(SigStatus.BAD_SIG, f"unknown sig_alg {getattr(msg, 'sig_alg', None)!r}")
+
+    # Reject an oversized signature before it touches memory/disk (F6 DoS guard).
+    if len(sig) > _MAX_SIG_BYTES:
+        return VerifyResult(SigStatus.BAD_SIG,
+                            f"signature too large ({len(sig)} bytes > {_MAX_SIG_BYTES})")
+
     signers = signers or allowed_signers_path()
     if not signers.exists():
         return VerifyResult(SigStatus.UNKNOWN_SIGNER, "no allowed_signers file")
     if not _SAFE_NAME.match(msg.from_ or ""):
         return VerifyResult(SigStatus.BAD_SIG, f"unsafe from {msg.from_!r}")
+
+    try:
+        payload = canonical_payload(msg)
+    except (ValueError, TypeError) as exc:
+        # A hostile message with a non-finite float or lone Unicode surrogate must
+        # not crash verify — classify as ERROR (GPT canonicalisation finding).
+        return VerifyResult(SigStatus.ERROR, f"uncanonicalisable payload: {exc}")
 
     tf = tempfile.NamedTemporaryFile(
         "w", suffix=".sig", delete=False, encoding="utf-8", newline="\n")
@@ -199,7 +263,7 @@ def verify(msg, signers: Path | None = None) -> VerifyResult:
         proc = subprocess.run(
             [_ssh_keygen(), "-Y", "verify", "-f", str(signers),
              "-I", msg.from_, "-n", NAMESPACE, "-s", tf.name],
-            input=canonical_payload(msg), capture_output=True,
+            input=payload, capture_output=True,
         )
     except FileNotFoundError:
         return VerifyResult(SigStatus.ERROR, "ssh-keygen not found")
@@ -242,7 +306,14 @@ def add_pin(principal: str, pubkey_line: str) -> bool:
     pubkey_line = (pubkey_line or "").strip()
     if not _SAFE_NAME.match(principal):
         raise SigningError(f"invalid principal {principal!r}: letters, digits, . _ - only")
-    if "\n" in pubkey_line or "\r" in pubkey_line or not _PUBKEY_RE.match(pubkey_line):
+    # Reject ANY control character (NUL / TAB / etc.) before the shape check —
+    # `.` in _PUBKEY_RE's comment group otherwise admits embedded NUL/TAB, which
+    # can corrupt the allowed_signers line or downstream tooling (GPT trust-store
+    # integrity finding). Full real-key validation (`ssh-keygen -l`) is a heavier
+    # follow-up; this closes the cheap, concrete hole now.
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in pubkey_line):
+        raise SigningError("public key line contains control characters")
+    if not _PUBKEY_RE.match(pubkey_line):
         raise SigningError("invalid public key line (expected `ssh-ed25519 AAAA... [comment]`)")
     entry = f"{principal} {pubkey_line}"
     existing = _read_signers_lines()
@@ -255,17 +326,54 @@ def add_pin(principal: str, pubkey_line: str) -> bool:
     return True
 
 
-def remove_pin(principal: str) -> int:
-    """Revoke: drop ALL allowed_signers entries for `principal`. Returns the
-    number removed. (The residual-risk window — peers who haven't pulled the
-    removal still accept the old key — is named in THREAT_MODEL.md.)"""
+def _atomic_write_signers(lines: list[str]) -> None:
+    """Write allowed_signers atomically (temp + os.replace) so a crash mid-write
+    can't truncate the trust root (GPT trust-store atomicity finding)."""
+    p = allowed_signers_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    content = ("\n".join(lines) + "\n") if lines else ""
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8", newline="\n")
+    os.replace(tmp, p)
+
+
+def remove_pin(principal: str, key: str | None = None) -> int:
+    """Revoke pinned keys for `principal`. Returns the number removed.
+
+    `key=None`  → drop ALL entries for `principal` (full revoke).
+    `key` set   → drop ONLY the matching entry (a full `ssh-ed25519 AAAA... [cmt]`
+                  line or its bare base64 blob), leaving the principal's OTHER keys
+                  pinned. This is what makes a staggered key-roll ("pin new, drop
+                  old once migrated") and single-key compromise recovery possible;
+                  the old API could only wipe the principal entirely, forcing a DoS
+                  window (the 3/3 cross-family F3 release-blocker).
+
+    (The residual-risk window — peers who haven't pulled the removal still accept
+    the old key — is named in THREAT_MODEL.md.)"""
     principal = (principal or "").strip()
+    target_blob = None
+    if key is not None:
+        # Match on the base64 blob so a differing trailing comment doesn't miss.
+        parts = key.strip().split()
+        target_blob = next((p for p in parts if p.startswith("AAAA")), key.strip())
+
     lines = _read_signers_lines()
-    kept = [ln for ln in lines if (ln.split(None, 1) or [""])[0] != principal]
+    kept: list[str] = []
+    for ln in lines:
+        fields = ln.split()
+        ln_principal = fields[0] if fields else ""
+        if ln_principal != principal:
+            kept.append(ln)
+            continue
+        if target_blob is not None:
+            ln_blob = next((f for f in fields[1:] if f.startswith("AAAA")), None)
+            if ln_blob != target_blob:
+                kept.append(ln)          # same principal, different key → keep
+                continue
+        # key is None (wipe-all) OR the blob matched → drop this line
     removed = len(lines) - len(kept)
     if removed:
-        p = allowed_signers_path()
-        p.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+        _atomic_write_signers(kept)
     return removed
 
 

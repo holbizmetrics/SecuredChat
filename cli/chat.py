@@ -357,11 +357,18 @@ def _verify_sig(msgs: list, *, policy: str) -> list:
             continue
         label = {
             signing.SigStatus.UNSIGNED: "unsigned",
+            signing.SigStatus.MISSING_EXPECTED_SIG:
+                "MISSING SIGNATURE — pinned sender sent no signature (downgrade/strip attack)",
             signing.SigStatus.UNKNOWN_SIGNER: "no pinned key verifies this sender",
             signing.SigStatus.BAD_SIG: "BAD SIGNATURE — tampered or forged",
             signing.SigStatus.ERROR: f"verify error ({res.detail})",
         }[res.status]
-        sev = "ALERT" if res.status is signing.SigStatus.BAD_SIG else "WARNING"
+        # A pinned sender going unsigned is an attack signal, not a benign
+        # unsigned message — ALERT like BAD_SIG (the F5 downgrade fix; strict
+        # already drops it via the fail-closed branch below).
+        sev = ("ALERT" if res.status in (signing.SigStatus.BAD_SIG,
+                                         signing.SigStatus.MISSING_EXPECTED_SIG)
+               else "WARNING")
         drop = policy == "strict"
         print(f"securedchat: {sev} sig {m.id[:8]} from={m.from_!r}: {label}"
               + ("  [dropped]" if drop else ""), file=sys.stderr)
