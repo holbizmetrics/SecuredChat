@@ -747,16 +747,28 @@ def cmd_presence(args: argparse.Namespace) -> None:
         return
     # Presence proves the heartbeat process is alive, NOT that an agent is
     # reading. Show last actual message age next to it so online-but-idle is
-    # visible at a glance (fresh beat + hour-old last message = nobody home).
+    # visible at a glance (fresh beat + hour-old last message = nobody home) —
+    # and derive the three-state word so the operator doesn't have to compute
+    # it: attending (fresh beat AND recent message) vs idle (fresh beat, stale
+    # or no message → don't re-ping, nobody's reading) vs offline (beat stale).
+    # Eve kernel-of-the-bus review F2, 2026-07-19: both clocks were already
+    # shown; the missing piece was the label that reads them for you.
     last_msg: dict[str, float] = {}
     for m in t.recv(since_id=None):
         last_msg[m.from_] = max(m.ts, last_msg.get(m.from_, 0.0))
     now = time.time()
     for r in rows:
-        status = "online" if r["age"] <= args.window else "stale "
+        beat_fresh = r["age"] <= args.window
         ts = last_msg.get(r["identity"])
+        msg_recent = ts is not None and (now - ts) <= args.attention
+        if not beat_fresh:
+            state = "offline  "
+        elif msg_recent:
+            state = "attending"
+        else:
+            state = "idle     "
         attn = f"last msg {_fmt_age(now - ts)} ago" if ts else "no messages yet"
-        print(f"{status}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
+        print(f"{state}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
               f" · {attn}")
 
 
@@ -1141,6 +1153,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="heartbeat interval seconds with --beat (default 120)")
     s_pres.add_argument("--window", type=float, default=300.0,
                         help="seconds within which an identity counts as online (default 300)")
+    s_pres.add_argument("--attention", type=float, default=300.0,
+                        help="seconds within which a last message counts as 'attending' vs "
+                             "'idle' (fresh beat but no recent message = nobody reading; default 300)")
     s_pres.set_defaults(func=cmd_presence)
 
     s_claim = sub.add_parser(
