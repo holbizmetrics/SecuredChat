@@ -725,6 +725,24 @@ def _fmt_age(seconds: float) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
+def presence_state(beat_age: float, msg_age: float | None,
+                   window: float, attention: float) -> str:
+    """Derive the three-state attention word from the two clocks (Eve review F2).
+
+    Pure so it can be locked by a corpus (NULL-CONTROL-AT-BIRTH: an instrument
+    people make re-ping decisions on ships with its discrimination control):
+      - beat stale (older than `window`)                 -> "offline"
+      - beat fresh AND a recent message (<= `attention`) -> "attending"
+      - beat fresh but no/old message                    -> "idle"  (nobody reading)
+    `msg_age` is None when the identity has never sent — that is NOT recent, so a
+    fresh-beat-never-spoke session is correctly "idle", not "attending"."""
+    if beat_age > window:
+        return "offline"
+    if msg_age is not None and msg_age <= attention:
+        return "attending"
+    return "idle"
+
+
 def cmd_presence(args: argparse.Namespace) -> None:
     t, _, identity = _build_transport(args)
     if args.once:
@@ -758,17 +776,11 @@ def cmd_presence(args: argparse.Namespace) -> None:
         last_msg[m.from_] = max(m.ts, last_msg.get(m.from_, 0.0))
     now = time.time()
     for r in rows:
-        beat_fresh = r["age"] <= args.window
         ts = last_msg.get(r["identity"])
-        msg_recent = ts is not None and (now - ts) <= args.attention
-        if not beat_fresh:
-            state = "offline  "
-        elif msg_recent:
-            state = "attending"
-        else:
-            state = "idle     "
-        attn = f"last msg {_fmt_age(now - ts)} ago" if ts else "no messages yet"
-        print(f"{state}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
+        msg_age = (now - ts) if ts is not None else None
+        state = presence_state(r["age"], msg_age, args.window, args.attention)
+        attn = f"last msg {_fmt_age(msg_age)} ago" if ts else "no messages yet"
+        print(f"{state:<9}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
               f" · {attn}")
 
 
