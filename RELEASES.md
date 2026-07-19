@@ -26,6 +26,25 @@ Releases are **tag-gated**: batch coherent work before tagging · **merge ≠ re
 - Since `c4b5d9f` adds user-facing features beyond the locked v3.3.3 scope, the post-review tag should be **`v3.4.0`** (scope = locked Tier-1 trio + transports + black-hole pass), superseding the v3.3.3 label above.
 - **Field-report fixes (same day, peer session testing `owed` in production):** `send` now resolves `--reply-to` PREFIXES to full ids on the wire (a prefix reply made a real answer look unanswered); `owed`/`--orphans` clear by prefix so historical threaded replies count; the send-side liveness guard counts actual message recency alongside the heartbeat (a peer that messages without a beat was warned as "last seen 115h ago" while it had answered 30 min earlier). Suite: **141 green**. The bus's first external field test caught all three within hours of shipping — the feedback loop the tool exists for, pointed at itself.
 
+**Update 2026-07-19 — wire-pair tag-blockers CLOSED + verified; v3.4.0 CUT:**
+- `canonical_payload` **v2** binds `room` + `bus` + `sig_alg` + `sig_v` itself (splice-proof in
+  both directions: a v2 message re-labelled v1, or v1 re-labelled v2, breaks the signature).
+  Verify binds to the CALLER's room/bus context, never message fields. Suite **170 green**.
+- **Independently hostile-verified cross-machine** (`EVE-VERIFY-signing-v2-2026-07-19.md`,
+  `d1970d3`): 12/12 attack battery fail-closed with a real keypair (cross-room, cross-bus,
+  both splices, tamper/re-target, alg-steering, unknown version, strip, policy matrix);
+  one-bump-completeness review found no further field that steers behavior outside the signature.
+- **Migration mechanics:** sign stays v1-default until the `SECUREDCHAT_SIG_V2` flag-day;
+  after it, `SECUREDCHAT_REQUIRE_SIG_V2` classifies valid v1 signatures as `LEGACY_SIG`
+  (warn flags, strict drops). **Bus binding is ROOM-ONLY until a `bus-id` file reaches every
+  clone** — creating it is a deliberate operator flag-day act, never a send side effect.
+- Named should-fix **before flag-day flips the default** (not tag-gating): the binding is
+  unit-verified at `signing.verify()`; add one end-to-end wiring test through send/recv so a
+  refactor defaulting room to "" cannot silently evaporate the binding unnoticed.
+- The external-review rung the old "do NOT tag yet" text gated on was discharged by the
+  2026-07-14 cross-family review (3 non-Claude arms + adjudication). The Davide human review
+  brief stays open as an additional rung, no longer tag-gating.
+
 **Deferred to `v3.3.4` (named, not forgotten):**
 - **Automated key lifecycle** — signed `key-roll` frame (accepted only when signed by the *old* key; the *compromise* case needs out-of-band re-pin, a distinct path) and `revoke` frame. Interim story is manual `trust`/`untrust`, which already gives a working rotation+revocation.
 - **Sign the WebRTC SDP handshake** to close the rogue-`sdp-answer` MITM — the signing primitive is now in place; applying it to `sdp-offer`/`sdp-answer` frames is the remaining wiring.
