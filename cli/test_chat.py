@@ -1004,6 +1004,94 @@ def test_addressing_and_owed(root: Path) -> None:
           "send guard: fresh MESSAGE counts as liveness (no false last-seen warning)")
 
 
+def test_signing_v2(root: Path) -> None:
+    """Wire-pair tag-blocker fix (2026-07-19): canonical_payload v2 binds
+    room + bus + sig_alg + sig_v. NULL-CONTROL-AT-BIRTH: the cross-room replay
+    v2 closes is first demonstrated GREEN under v1 (the documented F1 hole),
+    then RED under v2. Includes both splice directions (Eve's verify note):
+    v2-relabelled-v1 and v1-relabelled-v2 must both break."""
+    print("test_signing_v2 (wire-pair: room/bus/sig_alg/sig_v binding + migration policy)")
+    home = root / "sig_v2_home"
+    old_home = os.environ.get("SECUREDCHAT_HOME")
+    os.environ["SECUREDCHAT_HOME"] = str(home)
+    try:
+        try:
+            _, pub = signing.keygen("dana")
+        except signing.SigningError:
+            print("  SKIP (ssh-keygen unavailable)")
+            return
+        signing.add_pin("dana", pub)
+
+        # --- NULL CONTROL: v1 verifies regardless of room/bus (the F1 hole) ---
+        v1 = Message.new("dana", None, "replay me")
+        v1.sig = signing.sign(v1, identity="dana")
+        v1.sig_alg = signing.SIG_ALG
+        check(signing.verify(v1, room="room-a", bus="bus-x").ok
+              and signing.verify(v1, room="room-b", bus="bus-y").ok,
+              "NULL CONTROL: v1 sig verifies cross-room/bus (the documented hole v2 closes)")
+
+        # --- v2 happy path + F1 closed in both directions ---
+        v2 = Message.new("dana", None, "bound")
+        v2.sig = signing.sign(v2, identity="dana", sig_v=2, room="room-a", bus="bus-x")
+        v2.sig_alg = signing.SIG_ALG
+        v2.sig_v = 2
+        check(signing.verify(v2, room="room-a", bus="bus-x").ok,
+              "v2 verifies in its own room+bus")
+        check(signing.verify(v2, room="room-b", bus="bus-x").status is signing.SigStatus.BAD_SIG,
+              "F1: v2 cross-ROOM replay -> BAD_SIG")
+        check(signing.verify(v2, room="room-a", bus="bus-y").status is signing.SigStatus.BAD_SIG,
+              "F1: v2 cross-BUS replay -> BAD_SIG")
+
+        # --- splice cases: sig_v is INSIDE the signed payload ---
+        strip = Message.from_jsonl(v2.to_jsonl())
+        strip.sig_v = None
+        check(signing.verify(strip, room="room-a", bus="bus-x").status is signing.SigStatus.BAD_SIG,
+              "downgrade splice: v2 message re-labelled v1 -> BAD_SIG")
+        up = Message.from_jsonl(v1.to_jsonl())
+        up.sig_v = 2
+        check(signing.verify(up, room="room-a", bus="bus-x").status is signing.SigStatus.BAD_SIG,
+              "upgrade splice: v1 message re-labelled v2 -> BAD_SIG")
+        odd = Message.from_jsonl(v2.to_jsonl())
+        odd.sig_v = 3
+        check(signing.verify(odd, room="room-a", bus="bus-x").status is signing.SigStatus.BAD_SIG,
+              "unknown sig_v -> BAD_SIG (no attacker-steered version dispatch)")
+
+        # --- wire roundtrip carries the version ---
+        rt = Message.from_jsonl(v2.to_jsonl())
+        check(rt.sig_v == 2 and rt.sig == v2.sig,
+              "wire roundtrip: sig_v survives to_jsonl/from_jsonl")
+
+        # --- migration policy: v1 green until required, then LEGACY_SIG ---
+        check(signing.verify(v1, room="room-a", bus="bus-x").ok,
+              "compat: v1 still VERIFIED while require_v2 off (no flag-day breakage)")
+        check(signing.verify(v1, room="room-a", bus="bus-x", require_v2=True).status
+              is signing.SigStatus.LEGACY_SIG,
+              "require_v2: valid v1 from pinned sender -> LEGACY_SIG (signal, not attack)")
+        os.environ["SECUREDCHAT_REQUIRE_SIG_V2"] = "1"
+        try:
+            check(chat._verify_sig([v1], policy="strict", room="room-a", bus="bus-x") == [],
+                  "policy: strict + require-v2 DROPS legacy v1 (fail-closed)")
+            check(len(chat._verify_sig([v1], policy="warn", room="room-a", bus="bus-x")) == 1,
+                  "policy: warn + require-v2 KEEPS legacy v1 (flagged for upgrade)")
+        finally:
+            os.environ.pop("SECUREDCHAT_REQUIRE_SIG_V2", None)
+
+        # --- sender knob: SECUREDCHAT_SIG_V2 flips _maybe_sign to bound v2 ---
+        os.environ["SECUREDCHAT_SIG_V2"] = "1"
+        try:
+            m = Message.new("dana", None, "auto-v2")
+            chat._maybe_sign("dana", m, room="room-a", bus="bus-x")
+            check(m.sig_v == 2 and signing.verify(m, room="room-a", bus="bus-x").ok,
+                  "SECUREDCHAT_SIG_V2=1: _maybe_sign emits a bound v2 signature")
+        finally:
+            os.environ.pop("SECUREDCHAT_SIG_V2", None)
+    finally:
+        if old_home is None:
+            os.environ.pop("SECUREDCHAT_HOME", None)
+        else:
+            os.environ["SECUREDCHAT_HOME"] = old_home
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
     try:
@@ -1027,6 +1115,7 @@ def main() -> int:
         test_send_lock_windows_permission_error(root)
         test_signing(root)
         test_signing_hardening(root)
+        test_signing_v2(root)
         test_addressing_and_owed(root)
     finally:
         _rm(root)

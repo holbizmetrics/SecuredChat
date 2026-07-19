@@ -64,6 +64,7 @@ class SigStatus(Enum):
     UNKNOWN_SIGNER = "unknown-signer"  # no pinned key for this `from` (or none verifies)
     UNSIGNED = "unsigned"          # no signature present, and no key pinned for this `from`
     MISSING_EXPECTED_SIG = "missing-expected-signature"  # no signature BUT a key is pinned for this `from` -> downgrade/strip attack
+    LEGACY_SIG = "legacy-sig-version"  # VALID v1 signature where policy requires v2 (migration signal, not an attack)
     ERROR = "error"                # ssh-keygen missing / unexpected failure
 
 
@@ -123,10 +124,20 @@ def have_key(identity: str) -> bool:
 
 # ----- canonical payload (the one source of truth) ------------------------- #
 
-def canonical_payload(msg) -> bytes:
+def canonical_payload(msg, *, sig_v: int = 1, room: str = "", bus: str = "") -> bytes:
     """Deterministic bytes signed/verified for `msg`. Covers the full content
     tuple (NOT just body) so a signature can't be lifted onto a different
-    recipient/thread/id. Excludes sig/sig_alg (can't sign the signature).
+    recipient/thread/id. Excludes sig (can't sign the signature).
+
+    Two payload versions (the 2026-07-14 cross-family "wire-pair" tag-blockers):
+    - v1 (legacy): the original 7-field tuple — byte-identical to every signature
+      ever made, so all existing signatures keep verifying.
+    - v2 (2026-07-19): adds `room` + `bus` (F1: a v1-signed message can be
+      replayed into another room/bus and still verify) and `sig_alg` (B3
+      residual: the alg tag was unauthenticated metadata) — plus `sig_v` ITSELF,
+      so a v2 message re-labelled v1, or a v1 message re-labelled v2, breaks the
+      signature (splice/downgrade-proof). id/ts/reply_to were already in v1, so
+      time-replay and thread-splice were never open (checked vs the synthesis).
 
     Both sign and verify call this; a divergence here is the classic homegrown-
     crypto bug (signing X but verifying Y), so it is pinned by a test."""
@@ -139,6 +150,13 @@ def canonical_payload(msg) -> bytes:
         "body": msg.body,
         "reply_to": msg.reply_to,
     }
+    if sig_v == 2:
+        d["sig_v"] = 2
+        d["room"] = room or ""
+        d["bus"] = bus or ""
+        d["sig_alg"] = SIG_ALG
+    elif sig_v != 1:
+        raise SigningError(f"unknown sig_v {sig_v!r}")
     # allow_nan=False: reject NaN/Infinity rather than emit the non-standard
     # `NaN`/`Infinity` tokens a strict JSON parser would refuse (parser
     # disagreement across sign/verify). Byte-identical for all finite/valid
@@ -196,16 +214,20 @@ def keygen(identity: str, overwrite: bool = False) -> tuple[Path, str]:
 
 # ----- sign / verify ------------------------------------------------------- #
 
-def sign(msg, identity: str | None = None, key: Path | None = None) -> str:
+def sign(msg, identity: str | None = None, key: Path | None = None, *,
+         sig_v: int = 1, room: str = "", bus: str = "") -> str:
     """Return the armored SSH signature for `msg`'s canonical payload. Pass an
-    explicit `key` path, or `identity` to use that identity's pinned key."""
+    explicit `key` path, or `identity` to use that identity's pinned key.
+    `sig_v=2` binds room/bus/sig_alg into the payload (the caller must also set
+    `msg.sig_v = 2` so the wire carries the version verify dispatches on)."""
     kp = Path(key) if key is not None else key_path(identity or msg.from_)
     if not kp.exists():
         raise SigningError(f"no signing key at {kp} (run `keygen` first)")
     try:
         proc = subprocess.run(
             [_ssh_keygen(), "-Y", "sign", "-f", str(kp), "-n", NAMESPACE],
-            input=canonical_payload(msg), capture_output=True,
+            input=canonical_payload(msg, sig_v=sig_v, room=room, bus=bus),
+            capture_output=True,
         )
     except FileNotFoundError:
         raise SigningError("ssh-keygen not found (signing needs OpenSSH >= 8.2)")
@@ -214,10 +236,17 @@ def sign(msg, identity: str | None = None, key: Path | None = None) -> str:
     return proc.stdout.decode("utf-8")
 
 
-def verify(msg, signers: Path | None = None) -> VerifyResult:
+def verify(msg, signers: Path | None = None, *, room: str = "", bus: str = "",
+           require_v2: bool = False) -> VerifyResult:
     """Verify `msg`'s signature against the pinned `allowed_signers`, binding the
     principal to `msg.from_`. Returns a classified VerifyResult; the caller's
-    policy (off/warn/strict) decides what to do with each status."""
+    policy (off/warn/strict) decides what to do with each status.
+
+    `room`/`bus` are the CALLER'S context (where this message was actually read
+    from), never fields of the message — that asymmetry is what makes v2's
+    binding effective: a v2 signature made in room A cannot verify when read in
+    room B. `require_v2=True` downgrades a valid v1 signature to LEGACY_SIG
+    (the post-flag-day policy; v1 verifies normally until then)."""
     sig = getattr(msg, "sig", None)
     if not sig:
         # A missing signature is benign ONLY if no key is pinned for this
@@ -242,6 +271,15 @@ def verify(msg, signers: Path | None = None) -> VerifyResult:
         return VerifyResult(SigStatus.BAD_SIG,
                             f"signature too large ({len(sig)} bytes > {_MAX_SIG_BYTES})")
 
+    # Version dispatch: absent/1 = legacy payload, 2 = room/bus/alg-bound. The
+    # wire `sig_v` is attacker-writable — but for v2 it is ALSO inside the
+    # signed payload, so any re-labelling breaks the signature (verified by the
+    # downgrade/upgrade splice tests). An unknown version is rejected rather
+    # than dispatched (no attacker-steered version selection, same rule as B3).
+    sig_v = getattr(msg, "sig_v", None) or 1
+    if sig_v not in (1, 2):
+        return VerifyResult(SigStatus.BAD_SIG, f"unknown sig_v {sig_v!r}")
+
     signers = signers or allowed_signers_path()
     if not signers.exists():
         return VerifyResult(SigStatus.UNKNOWN_SIGNER, "no allowed_signers file")
@@ -249,7 +287,7 @@ def verify(msg, signers: Path | None = None) -> VerifyResult:
         return VerifyResult(SigStatus.BAD_SIG, f"unsafe from {msg.from_!r}")
 
     try:
-        payload = canonical_payload(msg)
+        payload = canonical_payload(msg, sig_v=sig_v, room=room, bus=bus)
     except (ValueError, TypeError) as exc:
         # A hostile message with a non-finite float or lone Unicode surrogate must
         # not crash verify — classify as ERROR (GPT canonicalisation finding).
@@ -274,7 +312,13 @@ def verify(msg, signers: Path | None = None) -> VerifyResult:
             pass
 
     if proc.returncode == 0:
-        return VerifyResult(SigStatus.VERIFIED)
+        # A valid v1 signature under a v2-required policy is a migration signal,
+        # not an attack — distinct status so `warn` can flag it while `strict`
+        # (fail-closed on anything non-VERIFIED) drops it.
+        if sig_v == 1 and require_v2:
+            return VerifyResult(SigStatus.LEGACY_SIG,
+                                "valid v1 signature, but v2 (room/bus binding) is required")
+        return VerifyResult(SigStatus.VERIFIED, "sig_v=2" if sig_v == 2 else "")
     err = proc.stderr.decode("utf-8", "replace").strip()
     # A pinned key exists but the bytes don't match → tamper/forgery. ssh-keygen
     # says "incorrect signature". No pinned key for the principal → just "Could

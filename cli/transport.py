@@ -70,6 +70,7 @@ class Message:
     reply_to: str | None = None
     sig: str | None = None       # armored SSH signature over canonical_payload (leg 3)
     sig_alg: str | None = None   # signature scheme tag, e.g. "ssh"; absent when unsigned
+    sig_v: int | None = None     # canonical_payload version: absent/1 legacy, 2 = room/bus-bound
 
     @classmethod
     def new(cls, from_: str, to: str | None, body: str, kind: str = "msg",
@@ -98,6 +99,8 @@ class Message:
         if self.sig is not None:
             d["sig"] = self.sig
             d["sig_alg"] = self.sig_alg or "ssh"
+            if self.sig_v:
+                d["sig_v"] = self.sig_v
         return json.dumps(d, ensure_ascii=False)
 
     @classmethod
@@ -116,6 +119,7 @@ class Message:
             reply_to=d.get("reply_to"),
             sig=d.get("sig"),
             sig_alg=d.get("sig_alg"),
+            sig_v=d.get("sig_v"),
         )
 
 

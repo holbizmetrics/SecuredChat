@@ -34,6 +34,8 @@ CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 CONFIG_ENV_TRANSPORT = "SECUREDCHAT_TRANSPORT"
 CONFIG_ENV_VERIFY_SIG = "SECUREDCHAT_VERIFY_SIG"  # off|warn|strict fleet-wide default for recv/watch
+CONFIG_ENV_SIG_V2 = "SECUREDCHAT_SIG_V2"          # truthy -> SIGN with payload v2 (room/bus-bound); flag-day flips this fleet-wide
+CONFIG_ENV_REQUIRE_SIG_V2 = "SECUREDCHAT_REQUIRE_SIG_V2"  # truthy -> valid v1 sigs classify LEGACY_SIG (post-flag-day policy)
 
 CONFIG_DIR = Path.home() / ".config" / "securedchat"
 # Legacy single global cursor (pre-fix): ONE file shared by every identity and
@@ -326,21 +328,52 @@ def _verify_from(t: "GitBusTransport", msgs: list, *, strict: bool) -> list:
     return kept
 
 
-def _maybe_sign(identity: str, msg: "Message", enabled: bool = True) -> "Message":
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name, "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _sig_ctx(t) -> tuple[str, str]:
+    """(room, bus-id) context that v2 signatures bind to. The bus-id is the
+    content of an optional `bus-id` file at the bus root — created by the
+    operator at the v2 flag-day (uuid into the file, commit it). Absent file →
+    "" (legacy bus): room binding still applies; bus binding activates the
+    moment the file reaches every clone. Deliberately NOT auto-created — writing
+    shared bus state is a flag-day act, not a side effect of sending."""
+    bus = ""
+    root = getattr(t, "root", None)
+    if root is not None:
+        p = Path(root) / "bus-id"
+        try:
+            if p.exists():
+                bus = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            bus = ""
+    return (getattr(t, "room", "") or ""), bus
+
+
+def _maybe_sign(identity: str, msg: "Message", enabled: bool = True, *,
+                room: str = "", bus: str = "") -> "Message":
     """Sign `msg` in place if signing is enabled AND this identity has a key.
     Auto-on once you `keygen` — so msg/ack/connect frames are all signed without
     a per-call flag. `--no-sign` (send only) or a missing key → unsigned, which
-    is fine: recv's --verify-sig governs how peers treat unsigned messages."""
+    is fine: recv's --verify-sig governs how peers treat unsigned messages.
+    SECUREDCHAT_SIG_V2 truthy → sign payload v2 (room/bus/alg-bound, wire-pair
+    fix); default stays v1 until the coordinated flag-day so un-upgraded peers
+    keep verifying our messages."""
     if enabled and signing.have_key(identity):
         try:
-            msg.sig = signing.sign(msg, identity=identity)
+            if _env_truthy(CONFIG_ENV_SIG_V2):
+                msg.sig_v = 2
+                msg.sig = signing.sign(msg, identity=identity, sig_v=2, room=room, bus=bus)
+            else:
+                msg.sig = signing.sign(msg, identity=identity)
             msg.sig_alg = signing.SIG_ALG
         except signing.SigningError as e:
             sys.exit(f"securedchat: signing failed: {e}")
     return msg
 
 
-def _verify_sig(msgs: list, *, policy: str) -> list:
+def _verify_sig(msgs: list, *, policy: str, room: str = "", bus: str = "") -> list:
     """Verify each message's signature against pinned allowed_signers.
 
     policy: 'warn'  → flag non-verified on stderr, KEEP them (observability
@@ -349,9 +382,10 @@ def _verify_sig(msgs: list, *, policy: str) -> list:
                        unknown-signer, bad-sig, and verify-errors all rejected).
     A BAD_SIG (a pinned key exists but bytes don't match = tamper/forgery) is the
     strongest signal — it's labelled ALERT either way; only strict drops it."""
+    require_v2 = _env_truthy(CONFIG_ENV_REQUIRE_SIG_V2)
     kept = []
     for m in msgs:
-        res = signing.verify(m)
+        res = signing.verify(m, room=room, bus=bus, require_v2=require_v2)
         if res.status is signing.SigStatus.VERIFIED:
             kept.append(m)
             continue
@@ -361,6 +395,8 @@ def _verify_sig(msgs: list, *, policy: str) -> list:
                 "MISSING SIGNATURE — pinned sender sent no signature (downgrade/strip attack)",
             signing.SigStatus.UNKNOWN_SIGNER: "no pinned key verifies this sender",
             signing.SigStatus.BAD_SIG: "BAD SIGNATURE — tampered or forged",
+            signing.SigStatus.LEGACY_SIG:
+                "LEGACY v1 SIGNATURE — valid, but this bus requires v2 (room/bus-bound); sender should upgrade",
             signing.SigStatus.ERROR: f"verify error ({res.detail})",
         }[res.status]
         # A pinned sender going unsigned is an attack signal, not a benign
@@ -455,7 +491,8 @@ def cmd_send(args: argparse.Namespace) -> None:
             print(f"securedchat: WARNING --reply-to {args.reply_to!r} matches no known message id "
                   f"(kept as given - threading/owed may not link)", file=sys.stderr)
     msg = Message.new(from_=identity, to=args.to, body=body, kind=args.kind, reply_to=reply_to)
-    _maybe_sign(identity, msg, enabled=not args.no_sign)
+    _room, _bus = _sig_ctx(t)
+    _maybe_sign(identity, msg, enabled=not args.no_sign, room=_room, bus=_bus)
     t.send(msg)
     if args.json:
         print(msg.to_jsonl())
@@ -520,7 +557,8 @@ def cmd_recv(args: argparse.Namespace) -> None:
         msgs = _verify_from(t, msgs, strict=(args.verify_from == "strict"))
     sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
     if sig_policy != "off":
-        msgs = _verify_sig(msgs, policy=sig_policy)
+        _room, _bus = _sig_ctx(t)
+        msgs = _verify_sig(msgs, policy=sig_policy, room=_room, bus=_bus)
     if getattr(args, "ack", False):
         _prior = {m.reply_to for m in t.recv(since_id=None)
                   if m.kind == "ack" and m.from_ == identity}
@@ -646,13 +684,14 @@ def cmd_watch(args: argparse.Namespace) -> None:
     else:
         since = args.since if args.since is not None else _resolve_since(t, identity, room)
     sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
+    _room, _bus = _sig_ctx(t)
     try:
         for m in t.watch(poll_seconds=args.poll, since_id=since):
             if args.addressed_to_me and not _addressed_to(identity, m.to):
                 continue
             if args.exclude_self and m.from_ == identity:
                 continue
-            if sig_policy != "off" and not _verify_sig([m], policy=sig_policy):
+            if sig_policy != "off" and not _verify_sig([m], policy=sig_policy, room=_room, bus=_bus):
                 continue  # dropped by strict policy (warn keeps + already logged)
             if args.json:
                 print(m.to_jsonl(), flush=True)
@@ -770,7 +809,8 @@ def _emit_ack(t, identity: str, target: Message) -> None:
     """Send a delivery receipt for `target`: kind=ack, addressed to its sender,
     reply_to = the acked message's id. Empty body — the receipt IS the payload."""
     m = Message.new(from_=identity, to=target.from_, body="", kind="ack", reply_to=target.id)
-    _maybe_sign(identity, m)
+    _room, _bus = _sig_ctx(t)
+    _maybe_sign(identity, m, room=_room, bus=_bus)
     t.send(m)
 
 
@@ -901,7 +941,8 @@ def cmd_connect(args: argparse.Namespace) -> None:
                 continue
             try:
                 m = Message.new(from_=identity, to=args.peer, body=line)
-                _maybe_sign(identity, m)
+                _cr, _cb = _sig_ctx(t)
+                _maybe_sign(identity, m, room=_cr, bus=_cb)
                 t.send(m)
             except Exception as e:  # a transient channel error must not kill the session
                 print(f"securedchat: send failed: {e}", file=sys.stderr)
