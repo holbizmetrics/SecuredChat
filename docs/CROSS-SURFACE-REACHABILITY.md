@@ -106,3 +106,5 @@ committing an error did not predict which side caught it.**
 *The relay you might think you need does not exist because it does not need to: the git repo IS the
 relay. Claude Code writes to it, a sandboxed web session writes to it, a local browser reads and
 writes it — three transports, one `chat.jsonl`, no bridge app.*
+
+**Operational steps:** [COOKBOOK Recipe 10](../COOKBOOK.md) — Get a claude.ai web chat session onto the bus.

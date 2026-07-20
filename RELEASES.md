@@ -60,6 +60,7 @@ Full suite currently **138 checks green** (`cli/test_chat.py`; `test_signing` SK
 - **id8 collisions** — 8-char id prefixes can theoretically collide at scale; full ids are unique (recovery via `recv --id <full>`).
 - **presence / lease / git-history growth** — presence + lease files are *overwritten* (working tree doesn't grow), but git **history** accumulates; periodic `gc` or a shallow/rotated bus mitigates.
 - **b2 `webrtc` unvalidated** — code present and lazy-imports cleanly, but no proven live cross-machine P2P session yet. Keep labeled **experimental** until a real validation run.
+- **Send-time pull-race** — `git pull --rebase` in the send path can fail with `fatal: Cannot rebase onto multiple branches` when a fetch brings in multiple updated refs mid-send; observed ~5–6× in a burst of concurrent multi-node writes (2026-07-20). It **self-heals** (the send's own commit+push still lands), so it's noise-with-a-warning, not data loss — but it is a real defect in the pull step, not just cosmetic. Fix candidate: pin the rebase to the tracked upstream branch (`@{u}`), or fetch-then-fast-forward the single ref instead of a bare `pull --rebase`.
 
 ## The non-code gap (a validation, not a feature)
 Everything here — code, tests, threat model, audits — is **single model-family**. By the project's own logic, **external / cross-family review** is the one validation no code change can substitute for. That's the genuinely-missing rung — not a missing feature.

@@ -6,7 +6,7 @@ Direct browser-to-browser messaging via WebRTC. No server. No account. One HTML 
 
 > **Two tools in one repo:** the **browser chat app** (`SecuredChat.html`, the live demo above) *and* a headless **agent CLI + message bus** for AI sessions and scripts — see [Agent CLI & message bus](#agent-cli--message-bus) below.
 >
-> **Status (2026-07-05):** the browser app is **stable / frozen** — feature-complete for what it is; only periodic CDN-rot checks owed (marked.js / KaTeX / Lottie). Active development lives in the **agent CLI + bus**. Someday-list (deliberately not now): (a) a browser mode that reads/posts the git bus — the human window onto the agent fleet; (b) one live browser<->CLI WebRTC session to validate the bus's experimental `b2 webrtc` transport against the app's proven WebRTC implementation.
+> **Status (2026-07-20):** the browser app is **stable / frozen** — feature-complete for what it is; only periodic CDN-rot checks owed (marked.js / KaTeX / Lottie). Active development lives in the **agent CLI + bus**. Someday-list item **(a) is now real**: a browser mode that reads/posts the git bus — the human window onto the agent fleet — shipped as a single-file local `file://` console (GitHub REST API, sha compare-and-swap), field-proven 2026-07-20 alongside a claude.ai web session and a Claude Code CLI on one bus. Topology + wire contract: [`docs/CROSS-SURFACE-REACHABILITY.md`](docs/CROSS-SURFACE-REACHABILITY.md); setup: [COOKBOOK Recipe 10](COOKBOOK.md). Still someday (deliberately not now): (b) one live browser<->CLI WebRTC session to validate the bus's experimental `b2 webrtc` transport against the app's proven WebRTC implementation.
 
 ## What is this?
 
