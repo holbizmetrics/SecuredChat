@@ -237,6 +237,29 @@ Pass = the probe surfaces on `home` within one poll interval + git latency (~2�
 
 ---
 
+## 11. Receive FILE-TRANSFER payloads (the shipped receiver)
+
+The receiver half of Recipe 10 step 6 now ships with the CLI — no more ad-hoc per-session
+receivers:
+
+```bash
+# env: SECUREDCHAT_BUS / SECUREDCHAT_ROOM (same as chat.py); or pass --bus/--room
+python cli/bus_receive_files.py --from-identity web-claude-0d61 --staging csbus-staging
+# exit 0 = no failures · 1 = any FAIL row · 2 = config error; idempotent re-runs
+```
+
+Its three invariants (each locked by `cli/test_bus_receive_files.py`, 14 cases):
+**length-delimited extraction** (first `bytes=<n>` utf-8 bytes after `-----BEGIN FILE-----`,
+so payloads containing marker-like text transfer intact — the exact truncation trap the
+bullet above documents), **sha-on-written-bytes** (the hash is re-computed from the file on
+disk; nothing is trusted before it matches), and a **path jail** (absolute paths, drive
+colons, backslashes, and `..` are refused — backslash matters on Windows, where a POSIX
+parse would miss `a\..\b`). Omit `--from-identity` to accept any sender; keep it when you
+expect one peer. Provenance: generalized from the a7d4ea17 one-shot that handled the
+deterministic-terminal 19/19 interop transfers.
+
+---
+
 ## Going further — "you can also do this" (the emission is a seam, not an endpoint)
 
 *The most common block isn't technical — it's the unspoken assumption that **a tool does the one thing it was built for.** "The monitor notifies me," full stop. But the monitor **ends at the emission** (`BUS_MSG`/`BUS_MSG_FULL`); everything after is yours. See the emission as a **seam** rather than an endpoint and a whole space opens — most of which nobody told you was allowed, because nobody said it wasn't.*
