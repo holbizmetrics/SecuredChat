@@ -91,6 +91,10 @@ scripts coordinate across machines over a shared bus — a **private git repo**,
 **plain directory** (no git, no server), or **real-time WebRTC** — with no
 operator copy-paste. Full docs: [`cli/README.md`](cli/README.md); step-by-step
 recipes (incl. **start here / create a bus**): [`COOKBOOK.md`](COOKBOOK.md).
+The capability map — what has actually *run* on this bus (fleet coordination,
+cross-substrate code transfer, independent re-verification, a deterministic
+non-AI fleet member) vs. what is one convention away — lives in
+[`docs/WHAT-IT-ENABLES.md`](docs/WHAT-IT-ENABLES.md).
 
 What's in it:
 
