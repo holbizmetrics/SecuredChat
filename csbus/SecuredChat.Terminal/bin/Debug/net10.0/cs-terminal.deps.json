@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "cs-terminal/1.0.0": {
+        "dependencies": {
+          "SecuredChat.Bus": "1.0.0"
+        },
+        "runtime": {
+          "cs-terminal.dll": {}
+        }
+      },
+      "SecuredChat.Bus/1.0.0": {
+        "runtime": {
+          "SecuredChat.Bus.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "cs-terminal/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "SecuredChat.Bus/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

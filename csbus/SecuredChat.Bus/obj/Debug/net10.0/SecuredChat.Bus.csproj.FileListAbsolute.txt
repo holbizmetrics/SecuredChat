@@ -1,0 +1,12 @@
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\bin\Debug\net10.0\SecuredChat.Bus.deps.json
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\bin\Debug\net10.0\SecuredChat.Bus.dll
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\bin\Debug\net10.0\SecuredChat.Bus.pdb
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.GeneratedMSBuildEditorConfig.editorconfig
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.AssemblyInfoInputs.cache
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.AssemblyInfo.cs
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.csproj.CoreCompileInputs.cache
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.sourcelink.json
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.dll
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\refint\SecuredChat.Bus.dll
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\SecuredChat.Bus.pdb
+D:\FromGitHubEtc\SecuredChat\csbus\SecuredChat.Bus\obj\Debug\net10.0\ref\SecuredChat.Bus.dll

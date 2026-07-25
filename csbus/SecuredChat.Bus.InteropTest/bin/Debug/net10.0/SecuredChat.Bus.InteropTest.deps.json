@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "SecuredChat.Bus.InteropTest/1.0.0": {
+        "dependencies": {
+          "SecuredChat.Bus": "1.0.0"
+        },
+        "runtime": {
+          "SecuredChat.Bus.InteropTest.dll": {}
+        }
+      },
+      "SecuredChat.Bus/1.0.0": {
+        "runtime": {
+          "SecuredChat.Bus.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "SecuredChat.Bus.InteropTest/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "SecuredChat.Bus/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
