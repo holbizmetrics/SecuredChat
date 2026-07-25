@@ -77,6 +77,32 @@ def main():
           f"died={died} n={len(parsed)}")
 
     print()
+    print("[report half - degradation must be VISIBLE, not silent]")
+    import io, contextlib, transport as _tr
+    _tr._TS_WARNED.clear()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        v = _tr._coerce_ts("not-a-time", _row_id="deadbeef12345")
+    out = err.getvalue()
+    check("bad ts still degrades to 0.0", v == 0.0)
+    check("...and SAYS SO on stderr (survival not mistaken for health)",
+          "WARNING" in out and "unreadable ts" in out, f"stderr={out!r}")
+    check("...naming the row so it can be found", "deadbeef" in out, f"stderr={out!r}")
+
+    err2 = io.StringIO()
+    with contextlib.redirect_stderr(err2):
+        _tr._coerce_ts("not-a-time", _row_id="deadbeef12345")
+    check("repeat of the SAME row is deduped (no spam on every read)",
+          err2.getvalue() == "", f"stderr={err2.getvalue()!r}")
+
+    err3 = io.StringIO()
+    with contextlib.redirect_stderr(err3):
+        _tr._coerce_ts(1753452681.0, _row_id="goodrow1")
+        _tr._coerce_ts("2026-07-25T14:31:21Z", _row_id="goodrow2")
+    check("KNOWN-CLEAN NEGATIVE: valid ts values warn about NOTHING",
+          err3.getvalue() == "", f"stderr={err3.getvalue()!r}")
+
+    print()
     if FAILS:
         print(f"BATTERY: {len(FAILS)} FAILURE(S) -> {FAILS}")
         return 1

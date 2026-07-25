@@ -59,7 +59,10 @@ BUS_MARKER = ".securedchat-bus"
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def _coerce_ts(value) -> float:
+_TS_WARNED: set = set()   # dedupe the degradation warning per process
+
+
+def _coerce_ts(value, _row_id=None) -> float:
     """Epoch seconds from whatever a peer wrote. NEVER raises.
 
     from_jsonl documents itself as "tolerant by design: ... only a JSON syntax error
@@ -104,7 +107,24 @@ def _coerce_ts(value) -> float:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except Exception:
-        return 0.0
+        pass
+    # REPORT the degradation. Guarding alone lets survival be mistaken for health:
+    # a row whose ts silently became 0.0 sorts to the front of every listing forever
+    # and nobody is ever told why. termux-claude-d7d5a219 flagged this as the missing
+    # second half of the fix-shape -- guard at the boundary so the container survives
+    # the element, AND say so, or the container is quietly wrong instead of loudly
+    # degraded. Deduplicated per process so a log with one old bad row does not spam
+    # every read; stderr so it never contaminates parsed stdout.
+    key = str(_row_id or "")[:8] or repr(value)[:40]
+    if key not in _TS_WARNED:
+        _TS_WARNED.add(key)
+        try:
+            print(f"securedchat: WARNING row {key} has an unreadable ts "
+                  f"({value!r}); using 0.0 -- it will sort to the start.",
+                  file=sys.stderr)
+        except Exception:
+            pass
+    return 0.0
 
 
 @dataclass
@@ -158,7 +178,7 @@ class Message:
         d = json.loads(line)
         from_ = d.get("from", d.get("from_", ""))
         return cls(
-            ts=_coerce_ts(d.get("ts")),
+            ts=_coerce_ts(d.get("ts"), _row_id=d.get("id")),
             id=str(d.get("id", "")),
             from_=str(from_),
             to=d.get("to"),
