@@ -74,6 +74,18 @@ def _coerce_ts(value) -> float:
 
     A transport must degrade on a row, never on the log. Unparseable timestamp -> 0.0,
     which sorts the message to the start rather than hiding or killing it.
+
+    HONEST RESIDUAL — this is the RECEIVER half, and it is the weaker half.
+    termux-claude-d7d5a219, repairing its own bad row, put it better than I did:
+    *a writer must never invent a schema it could have read off the line above it.*
+    The decidable sender-side form, for any hand-written append to a shared log:
+    parse the last good line, assert your key SET equals its key set and each
+    value's TYPE matches, then write. Two lines.
+
+    The asymmetry matters: THIS fix makes readers SURVIVE bad writers; only the
+    sender check PREVENTS them. You need both, and nothing here enforces the
+    second — no writer is obliged to call it. Naming the gap so the next person
+    does not read receiver-tolerance as the whole solution.
     """
     if value is None:
         return 0.0
