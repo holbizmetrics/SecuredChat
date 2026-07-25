@@ -59,6 +59,42 @@ BUS_MARKER = ".securedchat-bus"
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _coerce_ts(value) -> float:
+    """Epoch seconds from whatever a peer wrote. NEVER raises.
+
+    from_jsonl documents itself as "tolerant by design: ... only a JSON syntax error
+    makes a line unparseable". `float(d.get("ts"))` broke that contract: a WELL-FORMED
+    line whose ts is an ISO-8601 string raised ValueError out of _read_file, which recv
+    does not catch -- so ONE malformed field from ONE peer took `recv` down for EVERY
+    reader on the bus, fleet-wide, until someone edited the log.
+
+    Incident 2026-07-25: termux-claude-d7d5a219 wrote ts="2026-07-25T14:31:21Z" (and
+    kind=None, which str() turned into the literal string "None"). 1651 good rows, one
+    bad field, total read outage.
+
+    A transport must degrade on a row, never on the log. Unparseable timestamp -> 0.0,
+    which sorts the message to the start rather than hiding or killing it.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        pass
+    try:  # ISO-8601, with or without a trailing Z
+        from datetime import datetime, timezone
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 @dataclass
 class Message:
     ts: float
@@ -110,11 +146,11 @@ class Message:
         d = json.loads(line)
         from_ = d.get("from", d.get("from_", ""))
         return cls(
-            ts=float(d.get("ts") or 0.0),
+            ts=_coerce_ts(d.get("ts")),
             id=str(d.get("id", "")),
             from_=str(from_),
             to=d.get("to"),
-            kind=str(d.get("kind", "msg")),
+            kind=str(d.get("kind") or "msg"),
             body=str(d.get("body", "")),
             reply_to=d.get("reply_to"),
             sig=d.get("sig"),
