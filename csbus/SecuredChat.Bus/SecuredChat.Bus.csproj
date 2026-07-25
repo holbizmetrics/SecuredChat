@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Interop-proven on net8.0 (container SDK). On your machine just set this to
+         net10.0 (or multi-target: <TargetFrameworks>net8.0;net10.0</TargetFrameworks>)
+         — the code uses nothing newer than net8 BCL and has ZERO package references. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>SecuredChat.Bus</RootNamespace>
+  </PropertyGroup>
+
+</Project>
