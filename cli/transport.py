@@ -585,19 +585,44 @@ class GitBusTransport(LocalJsonlBus):
         return True
 
     def _pull_rebase(self) -> bool:
-        """`pull --rebase --autostash`, but DON'T discard the result. On failure,
-        abort any half-finished rebase so the repo isn't left wedged for the next
-        op, and warn loudly instead of silently serving stale local state as if
+        """Sync with upstream (`fetch --no-write-fetch-head` + `rebase
+        --autostash`), but DON'T discard the result. On failure, abort any
+        half-finished rebase so the repo isn't left wedged for the next op,
+        and warn loudly instead of silently serving stale local state as if
         current (the false "0 pending" failure). Returns True on success."""
-        # Pin the upstream remote+branch so a multi-ref FETCH_HEAD can't trigger
-        # "fatal: Cannot rebase onto multiple branches" (seen live during a
-        # concurrent-push storm). Fall back to a bare pull if there's no upstream.
+        # Never route the sync through .git/FETCH_HEAD: it is a SHARED,
+        # UNLOCKED file, so concurrent git activity in one clone (a second
+        # session, a wake-monitor poll, a presence beat) appends entries and
+        # `pull --rebase` dies with "Cannot rebase onto multiple branches" or
+        # "no candidate for rebasing against" — FETCH_HEAD entry count ==
+        # concurrency level, measured on 4 platform-contexts (2026-08-01).
+        # NOTE: pinning remote+branch as `pull --rebase <remote> <branch>`
+        # does NOT prevent this (this comment previously claimed it did;
+        # measured false — the args pick the rebase target, they don't stop
+        # other processes writing FETCH_HEAD). fetch --no-write-fetch-head +
+        # explicit-ref rebase never touches the racy file: 0 fault-A failures
+        # across all rigs. The concurrent ref-lock race on refs/remotes/* is
+        # a SEPARATE fault this does not fix; it stays transient + warned.
         up = self._git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", check=False)
         if up.returncode == 0 and "/" in up.stdout.strip():
             remote, branch = up.stdout.strip().split("/", 1)
-            res = self._git("pull", "--rebase", "--autostash", remote, branch, check=False)
+            res = self._git("fetch", "--no-write-fetch-head", "-q", remote, branch, check=False)
+            if res.returncode == 0:
+                res = self._git("rebase", "--autostash", f"{remote}/{branch}", check=False)
         else:
-            res = self._git("pull", "--rebase", "--autostash", check=False)
+            # No resolvable upstream: fail LOUD rather than guess a branch.
+            # The old bare `pull --rebase` fallback both raced on FETCH_HEAD
+            # and guessed its target; a bus clone with a remote but no
+            # upstream is a setup defect the operator should see, not one to
+            # paper over (`git branch --set-upstream-to origin/main`).
+            print(
+                "securedchat: WARNING pull skipped (no upstream configured "
+                "for this checkout — `git branch --set-upstream-to "
+                "origin/main`?); local state may be stale.",
+                file=sys.stderr,
+            )
+            self.last_pull_ok = False
+            return False
         if res.returncode == 0:
             self.last_pull_ok = True
             return True
