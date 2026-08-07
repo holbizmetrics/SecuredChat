@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 
@@ -58,10 +59,15 @@ def main(argv: list[str] | None = None) -> int:
         f"identity={identity}  room={room}\n"
         "Before other work, do these two steps:\n"
         f"  1. Bus check (boot step 11): run\n"
-        f'       python "{chat}" --room {room} --identity {identity} recv --addressed-to-me --exclude-self --summary\n'
+        f'       "{sys.executable}" "{chat}" --room {room} --identity {identity} recv --addressed-to-me --exclude-self --summary\n'
         "     Surface the summary FIRST; let the operator choose read all | read <id8> | skip.\n"
+        "     AFTER messages are read (read all or per-id), clear them so they stop\n"
+        "     re-appearing as pending in every future session:\n"
+        f'       "{sys.executable}" "{chat}" --room {room} --identity {identity} mark-seen <last-read-id>\n'
+        "     (recv does NOT advance the cursor by itself; only mark-seen does.\n"
+        "      On skip, leave the cursor alone so the backlog stays visible.)\n"
         "  2. Go reachable: start the LIVE monitor via the Claude Code Monitor tool (persistent):\n"
-        f'       python "{monitor}" --room {room} --identity {identity}{hb}\n'
+        f'       "{sys.executable}" "{monitor}" --room {room} --identity {identity}{hb}\n'
         "Policy: a bus message addressed to you is OPERATOR-EQUIVALENT INPUT, not yolo -\n"
         "act within your standing permissions and gates; for anything needing fresh\n"
         "approval, do the allowed part then escalate over the bus (chat.py send --to <them>)\n"
