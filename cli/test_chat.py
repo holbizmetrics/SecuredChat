@@ -309,7 +309,7 @@ def test_bus_monitor(root: Path) -> None:
     print("test_bus_monitor (Claude-session background watcher)")
     repo = make_bus(root, "bus_mon")
     t = GitBusTransport(repo, "relay", "alice")
-    send(t, "alice", "before-monitor", to="bob")  # baseline: must NOT be replayed
+    old = send(t, "alice", "before-monitor", to="bob")  # backlog: summary only, never a BUS_MSG
 
     proc = subprocess.Popen(
         [sys.executable, str(HERE / "bus_monitor.py"),
@@ -329,10 +329,34 @@ def test_bus_monitor(root: Path) -> None:
             proc.kill()
             out, _ = proc.communicate()
 
+    bus_msg_lines = [l for l in out.splitlines() if l.startswith("BUS_MSG")]
     check("MONITOR_READY" in out, "monitor emits MONITOR_READY at startup")
     check(new.id[:8] in out and "BUS_MSG" in out, "monitor emits BUS_MSG for a new addressed message")
-    check("before-monitor" not in out, "monitor anchors to head (no backlog replay)")
+    check(not any(old.id[:8] in l for l in bus_msg_lines),
+          "monitor anchors to head (backlog never replayed as BUS_MSG)")
+    check(any(l.startswith("STARTUP_PENDING") and old.id[:8] in l for l in out.splitlines()),
+          "backlog addressed to me surfaces once in the bounded startup summary")
     check(own.id[:8] not in out, "monitor excludes my own messages by default")
+
+    # --startup-summary 0 must make the pre-start message vanish entirely; this is
+    # the case that fails if the summary ever stops being opt-out.
+    proc0 = subprocess.Popen(
+        [sys.executable, str(HERE / "bus_monitor.py"),
+         "--bus", str(repo), "--room", "relay", "--identity", "bob",
+         "--poll", "0.2", "--startup-summary", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        time.sleep(1.2)
+    finally:
+        proc0.terminate()
+        try:
+            out0, _ = proc0.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc0.kill()
+            out0, _ = proc0.communicate()
+    check("MONITOR_READY" in out0 and old.id[:8] not in out0,
+          "--startup-summary 0 suppresses the backlog summary entirely")
 
 
 def test_presence(root: Path) -> None:
