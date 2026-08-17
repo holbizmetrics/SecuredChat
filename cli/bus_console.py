@@ -252,6 +252,23 @@ def resolve(args: argparse.Namespace) -> tuple[Path, str, str]:
     return Path(bus), room, identity
 
 
+def require_live_room(bus: Path, room: str) -> None:
+    """Refuse to snapshot a room that has no chat.jsonl.
+
+    Without this, a nonexistent room and a busy room answered with the same
+    confident "(0 msgs) / online: none" frame (absence-of-data rendered as
+    data; measured 2026-08-17: bare default 'relay' vs 'prometheus-relay'
+    with 2447 msgs). no-such-room and room-without-log are errors; only a
+    room WITH a chat.jsonl (even an empty one) is snapshotable."""
+    if (bus / room / "chat.jsonl").is_file():
+        return
+    live = sorted(d.name for d in bus.iterdir()
+                  if d.is_dir() and (d / "chat.jsonl").is_file())
+    state = "no such room dir" if not (bus / room).is_dir() else "room dir has no chat.jsonl"
+    sys.exit(f"room '{room}': {state} under {bus} — refusing to render an empty-looking "
+             f"snapshot of a room that does not exist. Rooms with traffic: {', '.join(live) or 'none'}")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="bus-console",
@@ -267,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
 
     force_utf8_io()
     bus, room, identity = resolve(args)
+    require_live_room(bus, room)
     t = GitBusTransport(bus, room, identity)
 
     messages: list[Message] = t.recv(since_id=None)
