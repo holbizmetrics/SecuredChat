@@ -1,0 +1,18 @@
+# securedchat-companion-0.1.2 — content-addressed artifact manifest
+#
+# Built by a deterministic packer: sorted members, mtime 0, uid/gid 0, mode 0644, gzip
+# mtime 0. Two consecutive builds were compared byte-for-byte before this file was written.
+#
+# artifact sha256: 936dbbd31110293328b73ba68a66c1fa2e84c08ca0938a389c0d7dc27cff230e
+
+936dbbd31110293328b73ba68a66c1fa2e84c08ca0938a389c0d7dc27cff230e  securedchat-companion-0.1.2.tar.gz
+
+# per-file sha256 of the packaged tree (verify a checkout without unpacking the archive):
+b03fb2ba8f0ecef2af9ba50b25305731e38fb1c0d146aea3c9fed13389c98463  COMPANION-WINDOWS.md
+4d1199d2d48e4c4641a2258c5f715c3a1580b2ea4b293e02e165dd9dc44411ea  LICENSE
+297b50f08386d3521f8fdaf2f78eb8d9d0acdf452d2e61596905fba37208c792  VERSION
+a6fadca20cdbfc002271f70ddb2114fbef98ef9e0a1411e090310170f403a15e  companion/__init__.py
+162cb7ba8d54830c2031be3c27fe3cdf98eb542375d88e7249744ae17d1cfb6d  companion/bridge.py
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  companion/tests/__init__.py
+c846e6e1200eb919218d81760562be006c3400d2d0e8b0f86768a54386e69cef  companion/tests/test_bridge.py
+e5b75c834dded1e9133ef6f1e1f7a1fc6975f099299612f5b15103df2de9b397  start_companion.ps1
