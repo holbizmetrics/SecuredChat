@@ -127,6 +127,44 @@ def _coerce_ts(value, _row_id=None) -> float:
     return 0.0
 
 
+def _is_git_noise(line: str) -> bool:
+    """True for git fetch/rebase output lines whose FAULT content is zero: the
+    "From <url>" header and successful per-ref status lines ("* branch main ->
+    FETCH_HEAD", "abc123..def456  main -> origin/main", "= [up to date] ...").
+    Their length scales with the REMOTE URL / ref names, which is what made a
+    fixed msg[:200] cap strip the fault's identity (SELF-DISGUISE defect,
+    courier row 124): boilerplate ate ~102-107 chars before the fault began.
+    Rejection markers ("! [rejected] ... -> ...") ARE faults and are kept."""
+    if line.startswith("From "):
+        return True
+    if "->" not in line or line.startswith("!"):
+        return False
+    low = line.lower()
+    return not any(k in low for k in
+                   ("error", "fatal", "warning", "hint", "cannot", "conflict"))
+
+
+def _summarize_git_failure(stderr: str | None, stdout: str | None,
+                           limit: int = 300) -> str:
+    """One-line summary of a failed git op that KEEPS the fault's identity.
+
+    Rule it enforces (the fix for SELF-DISGUISE): the fault text must survive
+    regardless of how long the remote URL or ref boilerplate is, and any
+    truncation must announce itself — a silently capped reason is the
+    absence-of-data-rendered-as-data class. Pure: no I/O, fully testable."""
+    text = ((stderr or "") + "\n" + (stdout or "")).strip()
+    if not text:
+        return "no output captured"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    kept = [ln for ln in lines if not _is_git_noise(ln)]
+    # If everything matched the noise filter, the "noise" was the whole story —
+    # fall back to all lines rather than report nothing.
+    msg = " | ".join(kept if kept else lines)
+    if len(msg) > limit:
+        msg = f"{msg[:limit]}… [+{len(msg) - limit} more chars]"
+    return msg
+
+
 @dataclass
 class Message:
     ts: float
@@ -629,9 +667,9 @@ class GitBusTransport(LocalJsonlBus):
         git_dir = self.bus_repo / ".git"
         if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
             self._git("rebase", "--abort", check=False)  # unwedge for next op
-        msg = (res.stderr or res.stdout or "").strip().replace("\n", " ")
+        msg = _summarize_git_failure(res.stderr, res.stdout)
         print(
-            f"securedchat: WARNING pull --rebase failed ({msg[:200]}); "
+            f"securedchat: WARNING pull --rebase failed ({msg}); "
             "local state may be stale (offline or merge conflict).",
             file=sys.stderr,
         )
