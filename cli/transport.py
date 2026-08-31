@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -57,6 +58,14 @@ BUS_MARKER = ".securedchat-bus"
 # anything that could inject into `git -c user.name=...`, a commit subject, or a
 # path (newline, '=', '/', '..', control chars).
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# Push contention on a shared bus is BURSTY, not uniform (see _push_with_retry).
+# 4 attempts with jittered exponential backoff span ~1-8s of contention; the old
+# 3 immediate retries spanned only the round-trip time and so retried INTO the
+# same burst. Raise the ceiling here, not at five call sites.
+PUSH_ATTEMPTS = 4
+PUSH_BACKOFF_MIN = 0.4
+PUSH_BACKOFF_MAX = 1.2
 
 
 _TS_WARNED: set = set()   # dedupe the degradation warning per process
@@ -676,6 +685,51 @@ class GitBusTransport(LocalJsonlBus):
         self.last_pull_ok = False
         return False
 
+    def _push_with_retry(self, what: str, attempts: int = PUSH_ATTEMPTS,
+                         sleep=time.sleep) -> None:
+        """Push, re-syncing between attempts. Raises RuntimeError on exhaustion.
+
+        Replaces five hand-copied `for _ in range(3): push; pull` loops (send,
+        archive, presence, lease acquire, lease release) that shared three
+        defects. Two are worth stating because the obvious reading of that loop
+        says it was fine:
+
+        WHY BACKOFF, not just more attempts. Peers beat presence in BURSTS --
+        measured on the live bus 2026-08-31, one box pushed 6 rooms in ~10s and
+        the room saw 123 presence commits from 3 identities in 40 minutes. Three
+        IMMEDIATE retries all land inside the same burst and lose to it, so the
+        loop's failure was not "the remote is unreachable", it was "we kept
+        arriving at the busiest moment". Sleeping first, THEN re-syncing, is what
+        makes the next attempt land after the burst rather than inside it; the
+        jitter is what stops two contending clones from re-colliding in lockstep.
+
+        WHY THE PULL'S RESULT IS CARRIED. `_pull_rebase()` returns False for a
+        genuinely different fault (offline, conflict, no upstream), and the old
+        loops discarded it -- so a STALE-STATE failure and a LOST RACE both
+        surfaced as the same "push rejected (fetch first)" text. They need
+        opposite responses (fix the checkout vs. wait and retry), and the one
+        fact that separates them was thrown away at the moment it existed. The
+        message now names the cause when there is one.
+
+        The third defect was minor: the old loops pulled after the final attempt
+        and then raised, spending a network round-trip on state nothing reads."""
+        result = None
+        pull_failed = False
+        for i in range(attempts):
+            result = self._git("push", check=False)
+            if result.returncode == 0:
+                return
+            if i == attempts - 1:
+                break  # no pull after the last attempt -- nothing would read it
+            sleep(random.uniform(PUSH_BACKOFF_MIN, PUSH_BACKOFF_MAX) * (2 ** i))
+            if not self._pull_rebase():
+                pull_failed = True
+        detail = ((result.stderr if result else "") or "").strip()
+        cause = (" -- and a re-sync pull ALSO failed, so this is STALE LOCAL "
+                 "STATE, not a lost race" if pull_failed else "")
+        raise RuntimeError(
+            f"{what} push failed after {attempts} attempts{cause}: {detail}")
+
     def init(self) -> str:
         """Create the bus marker + room chat.jsonl (+ union-merge .gitattributes)
         and commit them. Idempotent. Returns a human-readable status line."""
@@ -735,13 +789,7 @@ class GitBusTransport(LocalJsonlBus):
                     file=sys.stderr,
                 )
                 return
-            result = None
-            for _ in range(3):
-                result = self._git("push", check=False)
-                if result.returncode == 0:
-                    return
-                self._pull_rebase()
-            raise RuntimeError(f"push failed after retries: {result.stderr if result else ''}")
+            self._push_with_retry("message")
 
     def recv(self, since_id: str | None = None) -> list[Message]:
         with self._send_lock():
@@ -801,14 +849,7 @@ class GitBusTransport(LocalJsonlBus):
                     f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"
                 )
             if self._has_remote():
-                result = None
-                for _ in range(3):
-                    result = self._git("push", check=False)
-                    if result.returncode == 0:
-                        break
-                    self._pull_rebase()
-                else:
-                    raise RuntimeError(f"push failed after retries: {result.stderr if result else ''}")
+                self._push_with_retry("archive")
         return len(to_archive)
 
     def commit_author_map(self) -> dict[str, str]:
@@ -873,13 +914,7 @@ class GitBusTransport(LocalJsonlBus):
                     f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"
                 )
             if self._has_remote():
-                result = None
-                for _ in range(3):
-                    result = self._git("push", check=False)
-                    if result.returncode == 0:
-                        return
-                    self._pull_rebase()
-                raise RuntimeError(f"presence push failed after retries: {result.stderr if result else ''}")
+                self._push_with_retry("presence")
 
     def read_presence(self, pull: bool = True) -> list[dict]:
         """Return [{identity, ts, age}] for every presence file, newest first.
@@ -928,15 +963,7 @@ class GitBusTransport(LocalJsonlBus):
             if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr).lower():
                 raise RuntimeError(f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
             if self._has_remote():
-                pushed, result = False, None
-                for _ in range(3):
-                    result = self._git("push", check=False)
-                    if result.returncode == 0:
-                        pushed = True
-                        break
-                    self._pull_rebase()
-                if not pushed:
-                    raise RuntimeError(f"lease push failed after retries: {result.stderr if result else ''}")
+                self._push_with_retry("lease")
                 self._pull_rebase()  # re-resolve who actually won a near-simultaneous race
             winner = self._resolve_holder(work_id)
             if winner and winner["holder"] != self.identity:
@@ -963,15 +990,7 @@ class GitBusTransport(LocalJsonlBus):
             if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr).lower():
                 raise RuntimeError(f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
             if self._has_remote():
-                pushed, result = False, None
-                for _ in range(3):
-                    result = self._git("push", check=False)
-                    if result.returncode == 0:
-                        pushed = True
-                        break
-                    self._pull_rebase()
-                if not pushed:
-                    raise RuntimeError(f"lease release push failed after retries: {result.stderr if result else ''}")
+                self._push_with_retry("lease release")
             return {"status": "released", "work_id": work_id}
 
     def read_leases(self, pull: bool = True) -> list[dict]:
