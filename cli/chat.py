@@ -348,7 +348,44 @@ def _sig_ctx(t) -> tuple[str, str]:
                 bus = p.read_text(encoding="utf-8").strip()
         except OSError:
             bus = ""
+        bus = _pin_bus_id(root, bus)
     return (getattr(t, "room", "") or ""), bus
+
+
+def _pin_bus_id(root, seen: str) -> str:
+    """First-seen pin (TOFU) for the bus-id, kept OUTSIDE the shared repo.
+
+    Review 2026-09-02: the v2 bus binding read `bus-id` from the shared repo root with no
+    local copy, so anyone with write access to bus Y could put bus X's id into Y's
+    `bus-id`; readers on Y then computed bus=X and messages copied from X verified. The
+    binding was bypassable by the party it targets. The pin lives under signing's config
+    dir, keyed by the bus root, and the PINNED value is what verification binds to: a
+    swapped repo file makes signatures fail, and says so, instead of quietly passing.
+    An empty seen value (legacy bus, no file) pins nothing and changes nothing."""
+    if not seen:
+        return seen
+    try:
+        import hashlib
+        key = hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
+        pin = signing.config_dir() / f"bus-id.pin.{key}"
+        if pin.exists():
+            pinned = pin.read_text(encoding="utf-8").strip()
+            if pinned and pinned != seen:
+                print(f"securedchat: ALERT bus-id in the repo ({seen[:12]}) differs from the "
+                      f"locally PINNED bus-id ({pinned[:12]}) for {root} -- verification binds "
+                      f"to the PIN. If the operator really rotated the bus-id, delete {pin}.",
+                      file=sys.stderr)
+                return pinned
+            return seen
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text(seen + "\n", encoding="utf-8")
+        print(f"securedchat: bus-id {seen[:12]} PINNED on first sight for {root} ({pin})",
+              file=sys.stderr)
+        return seen
+    except OSError as e:
+        print(f"securedchat: WARNING could not read/write the bus-id pin ({e}); using the "
+              f"repo value UNPINNED", file=sys.stderr)
+        return seen
 
 
 def _maybe_sign(identity: str, msg: "Message", enabled: bool = True, *,
@@ -467,7 +504,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     body = args.body if args.body is not None else sys.stdin.read()
     if not body.strip():
         sys.exit("refusing to send empty message")
-    t, _, identity = _build_transport(args)
+    t, room, identity = _build_transport(args)
     if args.to:
         _warn_stale_target(t, args.to)
     else:
@@ -497,7 +534,9 @@ def cmd_send(args: argparse.Namespace) -> None:
     if args.json:
         print(msg.to_jsonl())
     else:
-        print(f"sent {msg.id[:8]} to {args.to or 'room'}")
+        # G41 (PCLA gaps-backlog): a sealed, intact send can still reach nobody because the
+        # ROOM was a silent default somewhere up the call chain. The confirmation names it.
+        print(f"sent {msg.id[:8]} to {args.to or 'room'} in room {room}")
 
 
 def cmd_recv(args: argparse.Namespace) -> None:

@@ -779,13 +779,22 @@ class GitBusTransport(LocalJsonlBus):
         and then raised, spending a network round-trip on state nothing reads."""
         result = None
         pull_failed = False
+        prev = 0.0
         for i in range(attempts):
             result = self._git("push", check=False)
             if result.returncode == 0:
                 return
             if i == attempts - 1:
                 break  # no pull after the last attempt -- nothing would read it
-            sleep(random.uniform(PUSH_BACKOFF_MIN, PUSH_BACKOFF_MAX) * (2 ** i))
+            # Jittered doubling, CLAMPED to be strictly increasing. With a jitter band
+            # whose ratio exceeds 2 (0.4..1.2), attempt i+1 could draw shorter than
+            # attempt i (measured 2026-09-02: 0.92s then 0.81s), which made the
+            # "strictly increasing" corpus arm flaky -- a gate that fails at random
+            # gets switched off. Growth is now guaranteed; the jitter stays.
+            delay = random.uniform(PUSH_BACKOFF_MIN, PUSH_BACKOFF_MAX) * (2 ** i)
+            delay = max(delay, prev * 1.5) if prev else delay
+            prev = delay
+            sleep(delay)
             if not self._pull_rebase():
                 pull_failed = True
         detail = ((result.stderr if result else "") or "").strip()
