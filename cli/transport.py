@@ -386,7 +386,7 @@ class LocalJsonlBus(Transport):
             active = self._read_all(include_archive=False)
             hits = [i for i, m in enumerate(active) if m.id.startswith(since_id)]
             if len(hits) == 1:
-                return active[hits[0] + 1:]
+                return self._after_cursor(active, hits[0])
             # 0 hits → cursor is archived or stale; >1 → ambiguous in active.
             # Both fall through to full-history resolution below.
         msgs = self._read_all(include_archive=True)
@@ -407,7 +407,38 @@ class LocalJsonlBus(Transport):
                 file=sys.stderr,
             )
             return []
-        return msgs[matches[0] + 1:]
+        return self._after_cursor(msgs, matches[0])
+
+    @staticmethod
+    def _after_cursor(msgs: list, i: int) -> list:
+        """Everything after the cursor, PLUS rows that sit BEFORE it out of order.
+
+        Review 2026-09-02 (linux-claude-5534b575), reproduced by construction: a send
+        whose push exhausts leaves its row M committed locally; the next pull-rebase
+        applies M on top of the fetched history, and `merge=union` emits the fetched
+        line N FIRST, then M. A cursor already on M (watch, mark-seen, fresh-anchor)
+        then never returns N -- a positional slice after M is empty. N is lost to that
+        reader for good, and nothing says so.
+
+        Rows are appended in ts order by every writer, so a row that sits before the
+        cursor with a ts GREATER than the cursor's can only be there by merge reorder
+        after the cursor was set. Those are delivered here, in ts order, ahead of the
+        tail, with a stderr note naming the mechanism.
+
+        HONEST RESIDUAL: a reordered row whose ts is <= the cursor's (the writer's
+        clock ran a few seconds behind ours) is indistinguishable from an already-
+        delivered row and is still missed. Exact recovery needs a seen-set beside the
+        cursor, which is a cursor-format change and not done here."""
+        cur = msgs[i]
+        late = [m for m in msgs[:i] if m.ts > cur.ts]
+        if late:
+            print(
+                f"securedchat: {len(late)} message(s) landed BEFORE cursor {cur.id[:8]} by "
+                f"merge reorder (ts newer than the cursor) -- delivered now, not skipped: "
+                + ", ".join(m.id[:8] for m in late),
+                file=sys.stderr,
+            )
+        return sorted(late, key=lambda m: m.ts) + msgs[i + 1:]
 
     # ----- same-host send lock (transport-agnostic) ----------------------- #
 
@@ -822,7 +853,16 @@ class GitBusTransport(LocalJsonlBus):
                     file=sys.stderr,
                 )
                 return
-            self._push_with_retry("message")
+            try:
+                self._push_with_retry("message")
+            except RuntimeError as e:
+                # The row IS committed locally and WILL publish on this clone's next
+                # successful push -- any push, including a presence beat. A resend
+                # after this message would put the same text on the bus twice.
+                raise RuntimeError(
+                    f"{e}\nsecuredchat: message {msg.id[:8]} is committed LOCALLY and will "
+                    f"publish on the next successful push from this clone -- do NOT resend it."
+                ) from e
 
     def recv(self, since_id: str | None = None) -> list[Message]:
         with self._send_lock():
