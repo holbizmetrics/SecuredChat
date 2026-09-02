@@ -301,6 +301,31 @@ class LocalJsonlBus(Transport):
 
     # ----- log reading (transport-agnostic) ------------------------------- #
 
+    @property
+    def _archive_index(self) -> Path:
+        return self.archive_dir / "ids.txt"
+
+    def _archive_ids(self):
+        """Set of archived ids from archive/ids.txt, or None if no index exists."""
+        try:
+            if not self._archive_index.exists():
+                return None
+            return {ln.strip() for ln in self._archive_index.read_text(encoding="utf-8").splitlines() if ln.strip()}
+        except OSError:
+            return None
+
+    def _write_archive_index(self, seg_path: Path, to_archive: list) -> None:
+        """archive/ids.txt: the fast path's replay guard. Seeded from every existing segment
+        the first time (one-off, at a moment that already rewrites the room), then appended
+        per compaction. Shared by every transport that compacts."""
+        idx = self._archive_index
+        if not idx.exists():
+            seed = [m.id for seg in self._archive_segments() if seg != seg_path for m in self._read_file(seg)]
+            idx.write_text("".join(i + "\n" for i in seed), encoding="utf-8")
+        with idx.open("a", encoding="utf-8") as f:
+            for m in to_archive:
+                f.write(m.id + "\n")
+
     def _archive_segments(self) -> list[Path]:
         """Archive segments in chronological order (lexicographic = chronological
         because segment names are zero-padded / timestamped at compaction)."""
@@ -348,7 +373,28 @@ class LocalJsonlBus(Transport):
         if include_archive:
             for seg in self._archive_segments():
                 msgs.extend(self._read_file(seg))
-        msgs.extend(self._read_file(self.chat_file))
+            msgs.extend(self._read_file(self.chat_file))
+        else:
+            # FAST PATH REPLAY GUARD (review 2026-09-02): this path reads the active
+            # tail only, so a row re-appended with an ARCHIVED id (same id, same valid
+            # signature) came back as new and verified. The full-history path was safe
+            # (dedup keeps the oldest copy); this one had no memory. compact() now
+            # maintains archive/ids.txt; when it exists, an active row whose id is in
+            # it is a REPLAY, dropped and named. When it does not exist yet (archives
+            # older than this guard), nothing is filtered and the reader is told once.
+            archived = self._archive_ids()
+            active = self._read_file(self.chat_file)
+            if archived is None:
+                if self._archive_segments():
+                    print("securedchat: archive index missing (pre-2026-09 archive) -- fast-path "
+                          "replay guard inactive until the next `compact`", file=sys.stderr)
+                msgs.extend(active)
+            else:
+                replays = [m for m in active if m.id in archived]
+                if replays:
+                    print(f"securedchat: REPLAY dropped -- {len(replays)} active row(s) carry an "
+                          f"ARCHIVED id: " + ", ".join(m.id[:8] for m in replays), file=sys.stderr)
+                msgs.extend(m for m in active if m.id not in archived)
         # Dedup by id, keeping the first (oldest) copy. Guards against a line that
         # ends up in BOTH an archive segment and the active file — e.g. a
         # union-merge of a compaction (which removed lines) racing a concurrent
@@ -910,13 +956,14 @@ class GitBusTransport(LocalJsonlBus):
             with seg_path.open("w", encoding="utf-8") as f:
                 for m in to_archive:
                     f.write(m.to_jsonl() + "\n")
+            self._write_archive_index(seg_path, to_archive)
             tmp = self.chat_file.with_name(self.chat_file.name + ".tmp")
             with tmp.open("w", encoding="utf-8") as f:
                 for m in keep:
                     f.write(m.to_jsonl() + "\n")
             os.replace(tmp, self.chat_file)
 
-            for rel in (seg_path, self.chat_file):
+            for rel in (seg_path, self.chat_file, self._archive_index):
                 add = self._git("add", str(rel.relative_to(self.bus_repo)), check=False)
                 if add.returncode != 0:
                     raise RuntimeError(f"git add failed: {add.stderr.strip()}")
@@ -1153,6 +1200,7 @@ class FileBusTransport(LocalJsonlBus):
             with seg_path.open("w", encoding="utf-8") as f:
                 for m in to_archive:
                     f.write(m.to_jsonl() + "\n")
+            self._write_archive_index(seg_path, to_archive)
             tmp = self.chat_file.with_name(self.chat_file.name + ".tmp")
             with tmp.open("w", encoding="utf-8") as f:
                 for m in keep:
