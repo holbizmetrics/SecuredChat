@@ -1019,8 +1019,12 @@ def cmd_connect(args: argparse.Namespace) -> None:
                     if m.from_ == identity:
                         continue
                     print(f"[{m.from_}] {m.body}", flush=True)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                # Review 2026-09-02: this swallowed everything, so a dead receive thread
+                # left the session looking connected while hearing nothing.
+                print(f"securedchat: RECEIVE STOPPED ({type(e).__name__}: {e}) -- this session "
+                      f"no longer hears the peer; reconnect", file=sys.stderr, flush=True)
+                return
 
         threading.Thread(target=rx, daemon=True).start()
         for line in sys.stdin:

@@ -427,12 +427,23 @@ def list_pins() -> list[tuple[str, str, str]]:
     for ln in _read_signers_lines():
         parts = ln.split(None, 2)
         if len(parts) >= 3:
-            principal, keytype, keydata = parts[0], parts[1], parts[2]
+            keytype, keydata = parts[1], parts[2]
             prefix = keydata.split()[0][:24] if keydata else ""
-            out.append((principal, keytype, prefix))
+            for principal in _principals(ln):
+                out.append((principal, keytype, prefix))
     return out
+
+
+def _principals(line: str) -> list[str]:
+    """allowed_signers lets one line pin several principals: `alice,bob ssh-ed25519 ...`.
+    Review 2026-09-02: is_pinned compared the FIRST token whole, so a hand-edited
+    multi-principal line pinned nobody in this check while ssh-keygen -Y verify would
+    still accept them -- an unsigned message from `bob` then classified UNSIGNED
+    (warning) instead of MISSING_EXPECTED_SIG (alert)."""
+    first = (line.split(None, 1) or [""])[0]
+    return [p.strip() for p in first.split(",") if p.strip()]
 
 
 def is_pinned(principal: str) -> bool:
     principal = (principal or "").strip()
-    return any((ln.split(None, 1) or [""])[0] == principal for ln in _read_signers_lines())
+    return any(principal in _principals(ln) for ln in _read_signers_lines())
