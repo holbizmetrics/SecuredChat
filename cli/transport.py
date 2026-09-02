@@ -190,6 +190,23 @@ def _coerce_opt_str(value, field: str = "", _row_id=None):
     return str(value)
 
 
+def _coerce_opt_int(value):
+    """For sig_v, which is declared int|None and COMPARED as an int downstream
+    (canonical_payload: `sig_v == 2` selects the bound payload, anything not in
+    {1,2} raises SigningError). The 2026-09-02 typed-fields commit routed sig_v
+    through _coerce_opt_str, so a v2 row came back as "2" and silently stopped
+    matching -- test_chat's wire-roundtrip check caught it on merge (termux).
+    None stays None; ints pass; an int-looking str parses; anything else -> None,
+    which reads as legacy/absent -- fail-closed under require_v2 (LEGACY_SIG ->
+    dropped), never a fabricated version. NEVER raises."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Message:
     ts: float
@@ -250,7 +267,7 @@ class Message:
             reply_to=_coerce_opt_str(d.get("reply_to"), "reply_to", d.get("id")),
             sig=_coerce_opt_str(d.get("sig"), "sig", d.get("id")),
             sig_alg=_coerce_opt_str(d.get("sig_alg"), "sig_alg", d.get("id")),
-            sig_v=_coerce_opt_str(d.get("sig_v"), "sig_v", d.get("id")),
+            sig_v=_coerce_opt_int(d.get("sig_v")),
         )
 
 

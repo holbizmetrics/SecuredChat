@@ -305,6 +305,60 @@ def test_watch_reanchor(root: Path) -> None:
     th.join(timeout=1)
 
 
+class MonitorReader:
+    """Drain a subprocess's stdout in a thread so a test can WAIT FOR A MARKER
+    instead of sleeping a fixed interval.
+
+    WHY: test_bus_monitor used `time.sleep(1.2)` as its synchronization primitive
+    before asserting MONITOR_READY had been printed. A fixed sleep is a bet on the
+    machine, not a check -- on a thermally-throttled tablet 1.2s was not always
+    enough for a second python interpreter to start, and the suite failed 3 runs
+    out of 5 (2026-08-31) with nothing whatever wrong in bus_monitor.py.
+
+    SAFE, and only because of the print ORDER in bus_monitor.py: the startup
+    summary (STARTUP_SUMMARY / STARTUP_PENDING, ~line 183) is printed BEFORE
+    MONITOR_READY (~line 194). So waiting for MONITOR_READY cannot make the
+    "--startup-summary 0 suppressed it" assertion vacuous -- if a summary were
+    going to appear, it already has by the time we stop waiting. If that order
+    ever flips, this helper stops being sound for the negative assertion.
+    """
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self.proc = proc
+        self.lines: list[str] = []
+        self._eof = threading.Event()
+        self._th = threading.Thread(target=self._drain, daemon=True)
+        self._th.start()
+
+    def _drain(self) -> None:
+        try:
+            for line in self.proc.stdout:  # type: ignore[union-attr]
+                self.lines.append(line)
+        finally:
+            self._eof.set()
+
+    def wait_for(self, needle: str, timeout: float = 20.0) -> bool:
+        """True once `needle` appears in the output. False on timeout, and False
+        on process exit without it -- never True merely because it stopped."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if any(needle in l for l in list(self.lines)):
+                return True
+            if self._eof.is_set() or time.monotonic() > deadline:
+                return any(needle in l for l in list(self.lines))
+            time.sleep(0.05)
+
+    def stop(self, timeout: float = 5.0) -> str:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        self._th.join(timeout=timeout)
+        return "".join(self.lines)
+
+
 def test_bus_monitor(root: Path) -> None:
     print("test_bus_monitor (Claude-session background watcher)")
     repo = make_bus(root, "bus_mon")
@@ -316,21 +370,21 @@ def test_bus_monitor(root: Path) -> None:
          "--bus", str(repo), "--room", "relay", "--identity", "bob", "--poll", "0.2"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    reader = MonitorReader(proc)
     try:
-        time.sleep(1.2)                      # start + anchor to head + MONITOR_READY
-        new = send(t, "alice", "hello-bob", to="bob")
+        started = reader.wait_for("MONITOR_READY")   # start + anchor to head
+        # `own` FIRST: the monitor emits a poll batch in id order, so once we have
+        # seen `new` emitted, `own` was necessarily already read and filtered. The
+        # reverse order would let "own.id not in out" pass merely because own had
+        # not been polled yet -- a negative assertion made vacuous by timing.
         own = send(t, "bob", "my own echo")  # from self -> must be filtered out
-        time.sleep(1.5)                      # let it poll (0.2s) and emit
+        new = send(t, "alice", "hello-bob", to="bob")
+        reader.wait_for(new.id[:8])                  # let it poll (0.2s) and emit
     finally:
-        proc.terminate()
-        try:
-            out, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, _ = proc.communicate()
+        out = reader.stop()
 
     bus_msg_lines = [l for l in out.splitlines() if l.startswith("BUS_MSG")]
-    check("MONITOR_READY" in out, "monitor emits MONITOR_READY at startup")
+    check(started and "MONITOR_READY" in out, "monitor emits MONITOR_READY at startup")
     check(new.id[:8] in out and "BUS_MSG" in out, "monitor emits BUS_MSG for a new addressed message")
     check(not any(old.id[:8] in l for l in bus_msg_lines),
           "monitor anchors to head (backlog never replayed as BUS_MSG)")
@@ -346,16 +400,12 @@ def test_bus_monitor(root: Path) -> None:
          "--poll", "0.2", "--startup-summary", "0"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    reader0 = MonitorReader(proc0)
     try:
-        time.sleep(1.2)
+        ready0 = reader0.wait_for("MONITOR_READY")
     finally:
-        proc0.terminate()
-        try:
-            out0, _ = proc0.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc0.kill()
-            out0, _ = proc0.communicate()
-    check("MONITOR_READY" in out0 and old.id[:8] not in out0,
+        out0 = reader0.stop()
+    check(ready0 and old.id[:8] not in out0,
           "--startup-summary 0 suppresses the backlog summary entirely")
 
 
