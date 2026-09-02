@@ -192,7 +192,7 @@ def keygen(identity: str, overwrite: bool = False) -> tuple[Path, str]:
         proc = subprocess.run(
             [_ssh_keygen(), "-t", "ed25519", "-f", str(tmp), "-N", "",
              "-C", f"{identity}@securedchat", "-q"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=60,
         )
     except FileNotFoundError:
         tmp.unlink(missing_ok=True)
@@ -227,7 +227,7 @@ def sign(msg, identity: str | None = None, key: Path | None = None, *,
         proc = subprocess.run(
             [_ssh_keygen(), "-Y", "sign", "-f", str(kp), "-n", NAMESPACE],
             input=canonical_payload(msg, sig_v=sig_v, room=room, bus=bus),
-            capture_output=True,
+            capture_output=True, timeout=60,
         )
     except FileNotFoundError:
         raise SigningError("ssh-keygen not found (signing needs OpenSSH >= 8.2)")
@@ -301,7 +301,7 @@ def verify(msg, signers: Path | None = None, *, room: str = "", bus: str = "",
         proc = subprocess.run(
             [_ssh_keygen(), "-Y", "verify", "-f", str(signers),
              "-I", msg.from_, "-n", NAMESPACE, "-s", tf.name],
-            input=payload, capture_output=True,
+            input=payload, capture_output=True, timeout=60,
         )
     except FileNotFoundError:
         return VerifyResult(SigStatus.ERROR, "ssh-keygen not found")

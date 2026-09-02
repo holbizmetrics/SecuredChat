@@ -66,6 +66,7 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 PUSH_ATTEMPTS = 4
 PUSH_BACKOFF_MIN = 0.4
 PUSH_BACKOFF_MAX = 1.2
+GIT_TIMEOUT = float(os.environ.get("SECUREDCHAT_GIT_TIMEOUT", "120"))  # seconds; every _git call
 
 
 _TS_WARNED: set = set()   # dedupe the degradation warning per process
@@ -174,6 +175,21 @@ def _summarize_git_failure(stderr: str | None, stdout: str | None,
     return msg
 
 
+def _coerce_opt_str(value, field: str = "", _row_id=None):
+    """None stays None; a str passes through; ANYTHING ELSE becomes its str() form.
+    NEVER raises. Review 2026-09-02 re-opened the _coerce_ts class on four more fields:
+    from_jsonl passed `to`, `reply_to`, `sig`, `sig_alg`, `sig_v` through raw, so one row
+    with "to": 5 raised TypeError inside _addressed_to (identity.startswith(to + "-")) for
+    EVERY reader running `recv --addressed-to-me`, and "sig": 1 raised inside verify under
+    any --verify-sig policy. `main` catches only RuntimeError/OSError -> traceback, fleet-wide
+    read outage from one line, until someone edits the log.
+    Coercing to str (not to None) is deliberate for `to`: a non-string target must never
+    silently become a BROADCAST -- "5" addresses nobody, which is the safe failure."""
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
 @dataclass
 class Message:
     ts: float
@@ -228,13 +244,13 @@ class Message:
             ts=_coerce_ts(d.get("ts"), _row_id=d.get("id")),
             id=str(d.get("id", "")),
             from_=str(from_),
-            to=d.get("to"),
+            to=_coerce_opt_str(d.get("to"), "to", d.get("id")),
             kind=str(d.get("kind") or "msg"),
             body=str(d.get("body", "")),
-            reply_to=d.get("reply_to"),
-            sig=d.get("sig"),
-            sig_alg=d.get("sig_alg"),
-            sig_v=d.get("sig_v"),
+            reply_to=_coerce_opt_str(d.get("reply_to"), "reply_to", d.get("id")),
+            sig=_coerce_opt_str(d.get("sig"), "sig", d.get("id")),
+            sig_alg=_coerce_opt_str(d.get("sig_alg"), "sig_alg", d.get("id")),
+            sig_v=_coerce_opt_str(d.get("sig_v"), "sig_v", d.get("id")),
         )
 
 
@@ -596,14 +612,31 @@ class GitBusTransport(LocalJsonlBus):
             )
         self.chat_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", *args],
-            cwd=self.bus_repo,
-            check=check,
-            capture_output=True,
-            text=True,
-        )
+    def _git(self, *args: str, check: bool = True,
+             timeout: float | None = None) -> subprocess.CompletedProcess:
+        """Every git call is bounded (review 2026-09-02: none was). A hung push held
+        .send.lock forever; siblings broke the lock at 10s and ran git concurrently.
+        GIT_TERMINAL_PROMPT=0 so a credential prompt fails instead of waiting on a TTY
+        nobody is watching. A timeout is returned as rc=124 with a stderr that NAMES it
+        (check=False) or raised as RuntimeError (check=True) -- never swallowed."""
+        env = dict(os.environ)
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        t = GIT_TIMEOUT if timeout is None else timeout
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=self.bus_repo,
+                check=check,
+                capture_output=True,
+                text=True,
+                timeout=t,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as e:
+            msg = f"git {' '.join(args[:2])} timed out after {t:g}s (GIT_TIMEOUT)"
+            if check:
+                raise RuntimeError(msg) from e
+            return subprocess.CompletedProcess(e.cmd, 124, stdout=(e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""), stderr=msg)
 
     def _has_remote(self) -> bool:
         return bool(self._git("remote", check=False).stdout.strip())

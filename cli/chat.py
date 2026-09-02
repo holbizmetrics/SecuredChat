@@ -515,6 +515,14 @@ def cmd_recv(args: argparse.Namespace) -> None:
             ids = ", ".join(m.id[:12] for m in matches)
             sys.exit(f"ambiguous id prefix {args.id!r} matches {len(matches)} messages: {ids}")
         m = matches[0]
+        # Review 2026-09-02: this path skipped --verify-sig entirely, so under strict a
+        # forged row dropped from the summary printed UNLABELLED when fetched by id --
+        # and by-id is exactly how monitors hand bodies to a reader.
+        sig_policy = args.verify_sig or os.environ.get(CONFIG_ENV_VERIFY_SIG) or "off"
+        if sig_policy != "off":
+            _room, _bus = _sig_ctx(t)
+            if not _verify_sig([m], policy=sig_policy, room=_room, bus=_bus):
+                sys.exit(f"message {m.id[:8]} DROPPED by --verify-sig {sig_policy}")
         if args.json:
             print(m.to_jsonl())
             return
@@ -754,12 +762,23 @@ def cmd_presence(args: argparse.Namespace) -> None:
               f"(Ctrl-C to stop)", file=sys.stderr)
         try:
             while True:
-                t.announce_presence()
+                try:
+                    t.announce_presence()
+                except RuntimeError as e:
+                    # Review 2026-09-02: one push exhaustion (a ~8s blip) killed the
+                    # heartbeat process and the identity read OFFLINE fleet-wide. A
+                    # heartbeat that dies on one missed beat is not a heartbeat. Say
+                    # it, keep beating; the next beat re-syncs and publishes both.
+                    print(f"presence beat FAILED (will retry next interval): {e}",
+                          file=sys.stderr, flush=True)
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("stopped", file=sys.stderr)
         return
     rows = t.read_presence()
+    if not t.last_pull_ok:
+        print("securedchat: STALE — pull failed (offline/conflict); this is the LOCAL clone's "
+              "view and may be out of date.", file=(sys.stderr if getattr(args, "json", False) else sys.stdout))
     if not rows:
         print("no presence records")
         return
@@ -813,6 +832,9 @@ def cmd_release(args: argparse.Namespace) -> None:
 def cmd_leases(args: argparse.Namespace) -> None:
     t, _, _ = _build_transport(args)
     rows = t.read_leases()
+    if not t.last_pull_ok:
+        print("securedchat: STALE — pull failed (offline/conflict); this is the LOCAL clone's "
+              "view and may be out of date.", file=(sys.stderr if getattr(args, "json", False) else sys.stdout))
     if not args.all:
         rows = [r for r in rows if r["alive"]]
     if args.json:
@@ -858,6 +880,9 @@ def cmd_ack(args: argparse.Namespace) -> None:
 def cmd_delivered(args: argparse.Namespace) -> None:
     t, _, _ = _build_transport(args)
     all_msgs = t.recv(since_id=None)
+    if not t.last_pull_ok:
+        print("securedchat: STALE — pull failed (offline/conflict); this is the LOCAL clone's "
+              "view and may be out of date.", file=(sys.stderr if getattr(args, "json", False) else sys.stdout))
     matches = [m for m in all_msgs if m.id.startswith(args.id) and m.kind != "ack"]
     if not matches:
         sys.exit(f"no message matches id: {args.id}")
