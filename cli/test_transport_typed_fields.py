@@ -10,7 +10,7 @@ the LOG. Also locks: a non-string `to` must NOT become a broadcast (None).
 Plus the _git bound: a hung git call must come back as rc=124 with a stderr that names
 the timeout (check=False) or raise RuntimeError (check=True) -- never hang, never vanish.
 """
-import sys, pathlib, json, subprocess, tempfile
+import os, sys, pathlib, json, subprocess, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import transport  # noqa: E402
 from transport import Message, _coerce_opt_str  # noqa: E402
@@ -43,6 +43,16 @@ def main():
         # the downstream call that crashed in the incident
         check("identity.startswith(to + '-') no longer raises", not "me-x".startswith(m.to + "-"))
         check("m.reply_to[:8] no longer raises", m.reply_to[:8] == "7")
+    # sig_v is the one field coerced to INT, not str: it is compared `== 2` in
+    # canonical_payload, so "2" (str) silently stopped matching v2 -- caught by
+    # test_chat's wire roundtrip at merge time (termux, 2026-09-02).
+    m_v = Message.from_jsonl(json.dumps({"id": "y1", "ts": 1.0, "from": "a",
+                                         "body": "b", "sig_v": "2"}))
+    check("sig_v: int-looking str parses to int 2", m_v.sig_v == 2)
+    m_v = Message.from_jsonl(json.dumps({"id": "y2", "ts": 1.0, "from": "a",
+                                         "body": "b", "sig_v": [2]}))
+    check("sig_v: junk degrades to None (legacy/absent, fail-closed), never a fake version",
+          m_v.sig_v is None)
     # negative control: a well-formed row is untouched
     good = {"ts": 1.0, "id": "y" * 36, "from": "a", "to": "b", "body": "", "reply_to": None}
     g = Message.from_jsonl(json.dumps(good))
@@ -57,17 +67,24 @@ def main():
             # find the transport class generically
             cls = [v for k, v in vars(transport).items() if isinstance(v, type) and hasattr(v, "_git")][0]
             t = cls(pathlib.Path(d), "room", "me")
-        # a git subcommand that blocks: `git credential fill` waits on stdin; with stdin captured
-        # and no input it blocks until timeout -> the bound must fire.
-        r = t._git("credential", "fill", check=False, timeout=1.0)
-        check("hung git returns rc=124 under check=False", r.returncode == 124, f"rc={r.returncode}")
-        check("stderr NAMES the timeout", "timed out" in (r.stderr or ""), r.stderr[:80])
-        raised = False
+        # a git call that blocks REGARDLESS of the harness's stdin. The first version
+        # used `credential fill`, which only hangs when the inherited stdin is an open
+        # tty/pipe -- under a /dev/null harness (termux, 2026-09-02) git exits 128
+        # instantly and the arm tested the harness, not the bound. `config --edit`
+        # waits for the editor to exit; a sleeping python editor is a portable hang.
+        os.environ["GIT_EDITOR"] = f'"{sys.executable}" -c "import time; time.sleep(30)"'
         try:
-            t._git("credential", "fill", check=True, timeout=1.0)
-        except RuntimeError as e:
-            raised = "timed out" in str(e)
-        check("hung git raises RuntimeError under check=True", raised)
+            r = t._git("config", "--edit", check=False, timeout=1.0)
+            check("hung git returns rc=124 under check=False", r.returncode == 124, f"rc={r.returncode}")
+            check("stderr NAMES the timeout", "timed out" in (r.stderr or ""), r.stderr[:80])
+            raised = False
+            try:
+                t._git("config", "--edit", check=True, timeout=1.0)
+            except RuntimeError as e:
+                raised = "timed out" in str(e)
+            check("hung git raises RuntimeError under check=True", raised)
+        finally:
+            os.environ.pop("GIT_EDITOR", None)
         # CONTROL: a fast call is unaffected and the env carries GIT_TERMINAL_PROMPT=0
         r = t._git("rev-parse", "--is-inside-work-tree", check=False, timeout=30)
         check("CONTROL: normal git call still rc=0", r.returncode == 0, r.stderr[:80])
