@@ -704,6 +704,20 @@ class LocalJsonlBus(Transport):
                 os.close(fd)
                 lock_path.unlink(missing_ok=True)
 
+    PRESENCE_NEVER = float("inf")   # resolved the remote; no presence file there
+
+    def presence_visible_age(self, fetch: bool = True) -> float | None:
+        """What peers can see of us, in seconds of staleness. See the git
+        override for the incident this answers.
+
+        The base answer is None -- CANNOT TELL -- because a transport with no
+        remote has no "what peers see" to report. It is defined here rather than
+        only on GitBusTransport so that asking is always legal: a caller checking
+        its own visibility should get an honest "unknown", never an
+        AttributeError that it will wrap in a try/except and read as fine.
+        """
+        return None
+
     # ----- watch (transport-agnostic, drives recv) ------------------------ #
 
     def watch(self, poll_seconds: float = 5.0, since_id: str | None = None) -> Iterator[Message]:
@@ -1265,6 +1279,58 @@ class GitBusTransport(LocalJsonlBus):
             with self._send_lock():
                 self._pull_rebase()
         return self._collect_presence()
+
+    def presence_visible_age(self, fetch: bool = True) -> float | None:
+        """Seconds since the presence timestamp PEERS CAN SEE, read from the
+        remote-tracking ref -- not from our working tree.
+
+        WHY THIS EXISTS (incident 2026-09-04, linux-claude-5534b575). A beat that
+        succeeds locally says nothing about whether anyone can see it. That box's
+        presence sweeper had died in a container restart; every remaining local
+        heartbeat sat in a clone 260 commits ahead of origin, and to every peer on
+        the bus the box read OFFLINE for 9h17m while its operator believed the
+        monitor was up. No existing check could have caught it: announce_presence
+        raises when a PUSH fails, and no push ever failed -- nothing was beating
+        at all. So the question this answers is deliberately not "did my write
+        succeed" but "what do peers see", which is the same question whatever the
+        cause: dead daemon, diverged clone, wrong branch, failed push.
+
+        Returns
+          float      seconds of staleness as peers see it (0 = just beaten)
+          inf        (PRESENCE_NEVER) we resolved the remote and there is no
+                     presence file for this identity: peers see us as never here
+          None       CANNOT TELL -- no remote, no tracking ref, unreadable ts.
+                     None is NOT "fine": callers must not render it as visible.
+                     Absence of the answer is not the answer.
+        """
+        if not self._has_remote():
+            return None
+        if fetch:
+            self._git("fetch", "--quiet", "origin", check=False)
+        ref = None
+        for cand in (f"origin/{self._current_branch()}", "origin/HEAD", "origin/main"):
+            if cand and self._git("rev-parse", "--verify", "--quiet", cand,
+                                  check=False).returncode == 0:
+                ref = cand
+                break
+        if ref is None:
+            return None
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", self.identity)
+        rel = f"{self.room}/presence/{safe}.json"
+        show = self._git("show", f"{ref}:{rel}", check=False)
+        if show.returncode != 0:
+            return self.PRESENCE_NEVER
+        try:
+            ts = _coerce_ts(json.loads(show.stdout).get("ts"), _row_id=safe)
+        except (json.JSONDecodeError, AttributeError, ValueError):
+            return None
+        if not ts:
+            return None
+        return max(0.0, time.time() - ts)
+
+    def _current_branch(self) -> str:
+        r = self._git("rev-parse", "--abbrev-ref", "HEAD", check=False)
+        return r.stdout.strip() if r.returncode == 0 else ""
 
     # ----- task leases (claim / release / read) --------------------------- #
     # Same conflict-free one-file-per-(work,identity) model as presence, plus
