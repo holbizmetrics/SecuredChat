@@ -276,39 +276,156 @@ public sealed class GitBusTransport
 	private sealed class SendLock(string path) : IDisposable
 	{
 		public FileStream? Stream;
+		public System.Threading.Timer? Beat;
 		public void Dispose()
 		{
+			// Stop the heartbeat and WAIT for any in-flight callback before
+			// deleting: a beat that lands after the delete would stamp a fresh
+			// mtime on a lock file a DIFFERENT holder has since created, making
+			// it look freshly beaten by a process that no longer holds it.
+			if (Beat is not null)
+			{
+				var done = new ManualResetEvent(false);
+				if (Beat.Dispose(done)) done.WaitOne(TimeSpan.FromSeconds(2));
+				done.Dispose();
+			}
 			Stream?.Dispose();
 			try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
 		}
 	}
 
+	// Mirrors cli/transport.py's LOCK_* constants; same env vars, same meaning.
+	// StaleAfter is a budget of MISSED HEARTBEATS (5 at these defaults), not a
+	// guess at how long a send takes — see AcquireSendLock.
+	private static readonly double LockHeartbeat = EnvDouble("SECUREDCHAT_LOCK_HEARTBEAT", 2.0);
+	private static readonly double LockStaleAfter = EnvDouble("SECUREDCHAT_LOCK_STALE_AFTER", 10.0);
+	private static readonly double LockMaxWait = EnvDouble("SECUREDCHAT_LOCK_MAX_WAIT", 300.0);
+
+	private static double EnvDouble(string name, double fallback)
+	{
+		var raw = Environment.GetEnvironmentVariable(name);
+		return double.TryParse(raw, System.Globalization.NumberStyles.Float,
+			System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
+	}
+
+	/// <summary>True/false/null, where null means "cannot tell" — same contract as
+	/// python's _pid_alive. Never terminates the probed process.</summary>
+	private static bool? PidAlive(int pid)
+	{
+		if (pid <= 0) return null;
+		try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
+		catch (ArgumentException) { return false; }   // no such process
+		catch (InvalidOperationException) { return false; }
+		catch (Exception) { return null; }            // access denied etc: unknown
+	}
+
+	/// <summary>The holder record python writes into the lock file, or null when the
+	/// file says nothing useful (empty = a holder mid-acquire, or an older C# peer).
+	/// Absence of the record is not a record of absence: callers fall back to mtime.</summary>
+	private static (string Host, int Pid, string Identity, string Op)? ReadLockHolder(string path)
+	{
+		try
+		{
+			var text = File.ReadAllText(path);
+			if (string.IsNullOrWhiteSpace(text)) return null;
+			using var doc = System.Text.Json.JsonDocument.Parse(text);
+			var root = doc.RootElement;
+			if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+			var host = root.TryGetProperty("host", out var h) ? h.GetString() ?? "" : "";
+			var ident = root.TryGetProperty("identity", out var i) ? i.GetString() ?? "" : "";
+			var op = root.TryGetProperty("op", out var o) ? o.GetString() ?? "" : "";
+			var pid = root.TryGetProperty("pid", out var p) && p.TryGetInt32(out var pv) ? pv : 0;
+			return (host, pid, ident, op);
+		}
+		catch (IOException) { return null; }
+		catch (UnauthorizedAccessException) { return null; }
+		catch (System.Text.Json.JsonException) { return null; }
+	}
+
 	/// <summary>Best-effort advisory lock serializing log-mutating ops on ONE
 	/// machine — same .send.lock file the python CLI uses, so a C# send and a
-	/// python recv on the same host serialize against each other. Stale locks
-	/// (older than timeout) are broken rather than blocking forever.</summary>
-	private IDisposable AcquireSendLock(double timeoutSeconds = 10.0)
+	/// python recv on the same host serialize against each other.
+	///
+	/// Review 2026-09-04 (finding #2), fixed in both peers together: the previous
+	/// version broke the lock on <c>age > timeout OR now > deadline</c>, both fixed
+	/// at 10s from acquisition — but one git call inside the critical section is
+	/// bounded at 120s and a send makes several plus push retries, so a HEALTHY
+	/// holder doing a 45s push had its lock broken and a sibling ran git
+	/// concurrently in the same clone. Elapsed time was being read as death.
+	///
+	/// Now the holder PROVES liveness by touching the lock file every
+	/// LockHeartbeat seconds, so age measures SILENCE. A waiter breaks instantly
+	/// on a lock naming a dead pid on this host, breaks on a stopped heartbeat
+	/// (which also covers other hosts and content-free locks written by older
+	/// peers), and NEVER breaks a beating holder — past LockMaxWait it throws
+	/// instead, so a caller still cannot block forever but fails visibly rather
+	/// than by running two gits in one clone.</summary>
+	private IDisposable AcquireSendLock(double timeoutSeconds = 0.0)
 	{
 		Directory.CreateDirectory(RoomDir);
-		var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+		// A holder cannot prove itself alive faster than it can beat, so a budget
+		// below a few heartbeats would break every live holder — the original bug
+		// in miniature. Callers asking for less get the floor.
+		var staleAfter = Math.Max(timeoutSeconds <= 0 ? LockStaleAfter : timeoutSeconds,
+			LockHeartbeat * 3);
+		var hardDeadline = DateTime.UtcNow.AddSeconds(LockMaxWait);
 		while (true)
 		{
 			try
 			{
 				var s = new FileStream(LockFile, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-				return new SendLock(LockFile) { Stream = s };
+				var record = System.Text.Json.JsonSerializer.Serialize(new
+				{
+					pid = Environment.ProcessId,
+					host = Environment.MachineName,
+					identity = Identity,
+					op = "send-lock",
+					ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
+				});
+				try
+				{
+					var bytes = System.Text.Encoding.UTF8.GetBytes(record);
+					s.Write(bytes, 0, bytes.Length);
+					s.Flush();
+				}
+				catch (IOException) { }  // content aids waiters; the mtime is what binds
+				var lockFile = LockFile;
+				var period = TimeSpan.FromSeconds(LockHeartbeat);
+				var beat = new System.Threading.Timer(_ =>
+				{
+					try { File.SetLastWriteTimeUtc(lockFile, DateTime.UtcNow); }
+					catch (IOException) { }
+					catch (UnauthorizedAccessException) { }
+				}, null, period, period);
+				return new SendLock(lockFile) { Stream = s, Beat = beat };
 			}
 			catch (IOException)
 			{
 				double age;
 				try { age = (DateTime.UtcNow - File.GetLastWriteTimeUtc(LockFile)).TotalSeconds; }
 				catch (FileNotFoundException) { continue; }
-				if (age > timeoutSeconds || DateTime.UtcNow > deadline)
+				var holder = ReadLockHolder(LockFile);
+				var dead = holder is not null
+					&& string.Equals(holder.Value.Host, Environment.MachineName,
+						StringComparison.OrdinalIgnoreCase)
+					&& PidAlive(holder.Value.Pid) == false;
+				if (dead || age > staleAfter)
 				{
 					try { File.Delete(LockFile); }
 					catch (UnauthorizedAccessException) { Thread.Sleep(100); }
 					catch (IOException) { Thread.Sleep(100); }
 					continue;
+				}
+				if (DateTime.UtcNow > hardDeadline)
+				{
+					var who = holder is null
+						? "unknown holder (no pid in lock file)"
+						: $"pid {holder.Value.Pid} on {holder.Value.Host} " +
+						  $"({holder.Value.Identity}, op={holder.Value.Op})";
+					throw new TimeoutException(
+						$"{LockFile} still held after {LockMaxWait:G}s by {who}; last " +
+						$"heartbeat {age:F1}s ago (< {staleAfter:G}s, so the holder is " +
+						$"alive and was NOT broken). Set SECUREDCHAT_LOCK_MAX_WAIT to wait longer.");
 				}
 				Thread.Sleep(100);
 			}

@@ -40,8 +40,10 @@ import json
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -67,6 +69,56 @@ PUSH_ATTEMPTS = 4
 PUSH_BACKOFF_MIN = 0.4
 PUSH_BACKOFF_MAX = 1.2
 GIT_TIMEOUT = float(os.environ.get("SECUREDCHAT_GIT_TIMEOUT", "120"))  # seconds; every _git call
+
+# ----- send-lock liveness (see LocalJsonlBus._send_lock) ------------------- #
+# The holder touches the lock file every LOCK_HEARTBEAT seconds, so LOCK_STALE_AFTER
+# is a budget of MISSED BEATS (5 at the defaults), not a guess at how long a send
+# takes. That is why it can stay at the old 10s even though one git call inside the
+# critical section may legitimately run for GIT_TIMEOUT=120s.
+LOCK_HEARTBEAT = float(os.environ.get("SECUREDCHAT_LOCK_HEARTBEAT", "2"))
+LOCK_STALE_AFTER = float(os.environ.get("SECUREDCHAT_LOCK_STALE_AFTER", "10"))
+LOCK_MAX_WAIT = float(os.environ.get("SECUREDCHAT_LOCK_MAX_WAIT", "300"))
+_HOST = socket.gethostname()
+
+
+def _pid_alive(pid) -> bool | None:
+    """True / False / None where None means "this host cannot tell".
+
+    POSIX: signal 0 is the standard existence probe. WINDOWS IS DELIBERATELY NOT
+    PROBED -- CPython's os.kill on Windows calls TerminateProcess for any signal
+    it does not special-case, so os.kill(pid, 0) would KILL the peer we are
+    merely asking about. None is the correct answer there and costs nothing: the
+    heartbeat already proves liveness, and the pid probe is only a shortcut for
+    breaking a dead holder's lock instantly instead of after LOCK_STALE_AFTER.
+    """
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by another user
+    except OSError:
+        return None
+    return True
+
+
+def _read_lock_holder(lock_path) -> dict | None:
+    """Who holds the lock, or None when the file says nothing useful.
+
+    None is the honest answer for an empty file (a holder mid-acquire, or a C#
+    GitBusTransport predating the 2026-09-04 fix, which wrote no content) and for
+    any unreadable one -- including the Windows case where the C# peer holds the
+    file with FileShare.None and our read fails with a sharing violation. Callers
+    must fall back to the mtime heartbeat and must never read None as "the holder
+    is dead": absence of the record is not a record of absence.
+    """
+    try:
+        d = json.loads(lock_path.read_text(encoding="utf-8") or "null")
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
 
 
 _TS_WARNED: set = set()   # dedupe the degradation warning per process
@@ -527,19 +579,58 @@ class LocalJsonlBus(Transport):
     # ----- same-host send lock (transport-agnostic) ----------------------- #
 
     @contextmanager
-    def _send_lock(self, timeout: float = 10.0):
+    def _send_lock(self, timeout: float = LOCK_STALE_AFTER,
+                   max_wait: float = LOCK_MAX_WAIT):
         """Best-effort advisory lock serializing log-mutating ops on ONE machine.
 
         Held by `send` (sync + append + commit) AND by `recv` (its sync + file
         read). Without it, a same-machine recv could sync while a send is mid-
         write, or read a half-written line. Cross-machine concurrency is covered
-        by the sync layer (git rebase-retry) or the shared filesystem. If the
-        lock can't be acquired within `timeout` (e.g. a crashed holder left a
-        stale lock), the stale lock is broken and we proceed rather than block.
+        by the sync layer (git rebase-retry) or the shared filesystem.
+
+        WHY A HEARTBEAT (review 2026-09-04, finding #2). The previous version
+        broke the lock on `age > timeout OR time.time() > deadline`, both fixed
+        at 10s from acquisition -- but a single git call inside the critical
+        section is bounded by GIT_TIMEOUT (120s), and a send makes several of
+        them plus jittered push retries. So a PERFECTLY HEALTHY holder doing a
+        45s push had its lock broken at 10s and a sibling ran git concurrently
+        in the same clone: precisely the failure the 2026-09-02 review bounded
+        _git to prevent, re-entered through the lock. The 10s was measuring
+        elapsed time and calling it deadness.
+
+        The fix is not a bigger number -- raising `timeout` to cover GIT_TIMEOUT
+        would make every genuinely crashed holder block its siblings for two
+        minutes, trading one failure for another. Instead the holder PROVES it
+        is alive: a daemon thread touches the lock file's mtime every
+        LOCK_HEARTBEAT seconds for as long as the lock is held, so `age` now
+        measures silence rather than duration, and 10s of silence (5 missed
+        beats) really is a dead or wedged holder. A waiter therefore:
+          * breaks INSTANTLY when the lock names a pid on this host that is
+            gone (crash recovery goes from 10s to ~0s -- strictly better than
+            before);
+          * breaks on `age > timeout`, which now covers a holder whose
+            heartbeat stopped, a holder on another host, and legacy/empty lock
+            files written by a peer that predates this format;
+          * NEVER breaks a demonstrably heartbeating holder. If one holds past
+            `max_wait` it raises TimeoutError naming the holder instead. That
+            keeps the old guarantee that a caller never blocks forever, while
+            failing in the safe direction: a visible failed send beats two
+            gits mutating one clone.
+
+        The lock file's CONTENT is new (JSON: pid/host/identity/op/ts) and is
+        additive -- the C# GitBusTransport shares this same file and reads only
+        the mtime, so it still interoperates as a waiter. It writes no content,
+        which is exactly the "holder unknown" case handled above.
         """
         lock_path = self.chat_file.parent / ".send.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.time() + timeout
+        # A holder cannot prove itself alive faster than it can beat, so a budget
+        # below a few heartbeats would break every live holder -- the original bug
+        # in miniature. Callers asking for less get the floor. (test_chat.py's
+        # PermissionError case passes timeout=2.0, which is exactly this; its lock
+        # is 1000s old, so it still breaks at once.)
+        stale_after = max(timeout, LOCK_HEARTBEAT * 3)
+        hard_deadline = time.time() + max_wait
         fd = None
         while True:
             try:
@@ -550,7 +641,15 @@ class LocalJsonlBus(Transport):
                     age = time.time() - lock_path.stat().st_mtime
                 except FileNotFoundError:
                     continue
-                if age > timeout or time.time() > deadline:
+                holder = _read_lock_holder(lock_path)
+                # casefold: the C# peer writes Environment.MachineName, which can
+                # differ in case from socket.gethostname() on the same Windows box.
+                # A mismatch only costs the instant-break shortcut (we fall back to
+                # the heartbeat), but there is no reason to pay it.
+                dead = (holder is not None
+                        and str(holder.get("host") or "").casefold() == _HOST.casefold()
+                        and _pid_alive(holder.get("pid")) is False)
+                if dead or age > stale_after:
                     try:
                         lock_path.unlink(missing_ok=True)  # break stale lock, then retry
                     except PermissionError:
@@ -561,10 +660,46 @@ class LocalJsonlBus(Transport):
                         # stale. Back off and retry like ordinary contention.
                         time.sleep(0.1)
                     continue
+                if time.time() > hard_deadline:
+                    who = "unknown holder (no pid in lock file)"
+                    if holder is not None:
+                        who = (f"pid {holder.get('pid')} on {holder.get('host')} "
+                               f"({holder.get('identity')}, op={holder.get('op')})")
+                    raise TimeoutError(
+                        f"{lock_path} still held after {max_wait:g}s by {who}; last "
+                        f"heartbeat {age:.1f}s ago (< {stale_after:g}s, so the holder is "
+                        f"alive and was NOT broken). Set SECUREDCHAT_LOCK_MAX_WAIT to "
+                        f"wait longer.")
                 time.sleep(0.1)
+
+        # We hold it: stamp who we are, then start proving we are still here.
+        try:
+            os.write(fd, json.dumps({
+                "pid": os.getpid(), "host": _HOST, "identity": self.identity,
+                "op": "send-lock", "ts": time.time(),
+            }).encode("utf-8"))
+        except OSError:
+            pass  # content is an aid to waiters, never load-bearing; mtime is
+        stop = threading.Event()
+
+        def _beat() -> None:
+            while not stop.wait(LOCK_HEARTBEAT):
+                try:
+                    os.utime(lock_path, None)
+                except OSError:
+                    return  # someone broke our lock, or the dir went away
+        beat = threading.Thread(target=_beat, name="send-lock-heartbeat", daemon=True)
+        beat.start()
         try:
             yield
         finally:
+            stop.set()
+            # JOIN, don't just signal: otherwise a beater can still be scheduled
+            # after we unlink, and os.utime would then resurrect the mtime of a
+            # lock file a DIFFERENT holder has since created -- making a fresh
+            # lock look freshly beaten by a process that no longer holds it.
+            # Bounded so a wedged beater cannot hang the caller.
+            beat.join(timeout=max(1.0, LOCK_HEARTBEAT * 2))
             if fd is not None:
                 os.close(fd)
                 lock_path.unlink(missing_ok=True)
@@ -765,6 +900,11 @@ class GitBusTransport(LocalJsonlBus):
              timeout: float | None = None) -> subprocess.CompletedProcess:
         """Every git call is bounded (review 2026-09-02: none was). A hung push held
         .send.lock forever; siblings broke the lock at 10s and ran git concurrently.
+        Bounding git closed half of that: the other half was that the 10s break fired
+        on HEALTHY holders too, closed by the heartbeat in _send_lock (review
+        2026-09-04). GIT_TIMEOUT is now the bound on one call inside the critical
+        section; LOCK_STALE_AFTER is a budget of missed heartbeats, not of elapsed
+        time, so the two no longer have to agree.
         GIT_TERMINAL_PROMPT=0 so a credential prompt fails instead of waiting on a TTY
         nobody is watching. A timeout is returned as rc=124 with a stderr that NAMES it
         (check=False) or raised as RuntimeError (check=True) -- never swallowed."""
