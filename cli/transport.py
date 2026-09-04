@@ -207,6 +207,27 @@ def _coerce_opt_int(value):
         return None
 
 
+def _coerce_ttl(value):
+    """Lease TTL in seconds, or None when it cannot be read. NEVER raises.
+
+    SEPARATE from _coerce_ts on purpose, because the SAFE FAILURE DIRECTION is the
+    opposite one. `_collect_leases` reads `ttl <= 0` as "no expiry", so coercing an
+    unreadable ttl to 0.0 would turn a corrupt lease file into an IMMORTAL lease that
+    blocks its work_id for every peer, forever. None instead means "this claim cannot
+    be honoured", and the aliveness test below treats it as expired -> the work reads
+    FREE. Two claimants racing is a condition the earliest-claimed_at rule already
+    resolves; a permanently held lock is not.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Message:
     ts: float
@@ -592,7 +613,23 @@ class LocalJsonlBus(Transport):
     def _collect_presence(self) -> list[dict]:
         """Return [{identity, ts, age}] for every presence file, newest first.
         `age` is seconds since that identity's last heartbeat. Callers apply
-        their own online/stale window. Pure file read — no sync."""
+        their own online/stale window. Pure file read — no sync.
+
+        SIBLING SWEEP of the 2026-07-25 _coerce_ts incident (review 2026-09-04,
+        reproduced by construction before fixing): this read used a bare
+        `float(d.get("ts"))` OUTSIDE the try, which catches only JSONDecodeError
+        and OSError. A WELL-FORMED presence file whose ts is an ISO string
+        (`"2026-09-04T09:00:00Z"` — the exact shape one peer already wrote to
+        chat.jsonl in that incident) raised ValueError out of this function, so
+        ONE bad file made EVERY identity unreadable, fleet-wide, and the symptom
+        was the whole bus reading as offline. _coerce_ts was written for exactly
+        this class and applied only to the message path; presence and leases were
+        the un-swept siblings. Presence files are the most frequently written
+        objects on the bus, so this was the likeliest place for it to fire.
+
+        Direction of failure, deliberately: an unreadable ts becomes 0.0, which
+        reads as maximally STALE and keeps the identity VISIBLE. Dropping the row
+        instead would hide a box that is up — absence-of-data rendered as data."""
         if not self.presence_dir.is_dir():
             return []
         now = time.time()
@@ -602,7 +639,7 @@ class LocalJsonlBus(Transport):
                 d = json.loads(pf.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            ts = float(d.get("ts") or 0.0)
+            ts = _coerce_ts(d.get("ts"), _row_id=pf.stem)
             rows.append({"identity": d.get("identity") or pf.stem, "ts": ts, "age": now - ts})
         rows.sort(key=lambda r: r["ts"], reverse=True)
         return rows
@@ -628,7 +665,19 @@ class LocalJsonlBus(Transport):
         """One row per work_id: {work_id, holder, claimed_at, age, ttl, alive,
         contenders}. holder/alive reflect the earliest un-expired claim; alive is
         False when every claim for that work_id has expired (ttl seconds since its
-        last heartbeat). Pure file read — no sync."""
+        last heartbeat). Pure file read — no sync.
+
+        SIBLING SWEEP of the same _coerce_ts class as _collect_presence above
+        (review 2026-09-04): ts / claimed_at / ttl were parsed with bare `float()`
+        outside the try, so one well-formed lease file with a string ts took the
+        whole lease read down. Each field gets the direction that fails SAFE:
+          ts         -> 0.0, so the claim reads EXPIRED (work free), never held.
+          claimed_at -> falls back to ts. Coercing it independently to 0.0 would
+                        make a corrupt claim win every race, since the holder is
+                        min(claimed_at).
+          ttl        -> None via _coerce_ttl, treated as expired below. 0.0 would
+                        have meant "never expires" (see the alive test) — an
+                        immortal lease on a corrupt file."""
         if not self.lease_dir.is_dir():
             return []
         now = time.time()
@@ -641,16 +690,22 @@ class LocalJsonlBus(Transport):
             wid = d.get("work_id")
             if not wid:
                 continue
-            ts = float(d.get("ts") or 0.0)
+            ts = _coerce_ts(d.get("ts"), _row_id=lf.stem)
+            claimed_raw = d.get("claimed_at")
+            claimed_at = _coerce_ts(claimed_raw, _row_id=lf.stem) if claimed_raw else ts
             by_work.setdefault(wid, []).append({
                 "holder": d.get("holder") or lf.stem,
-                "claimed_at": float(d.get("claimed_at") or ts),
+                "claimed_at": claimed_at or ts,
                 "ts": ts,
-                "ttl": float(d.get("ttl") or 0.0),
+                "ttl": _coerce_ttl(d.get("ttl")),
             })
         rows: list[dict] = []
         for wid, claims in by_work.items():
-            alive = [c for c in claims if c["ttl"] <= 0 or (now - c["ts"]) <= c["ttl"]]
+            # `ttl is None` = unreadable = NOT alive (see _coerce_ttl). Only a
+            # ttl that genuinely parsed may claim the no-expiry (<= 0) branch.
+            alive = [c for c in claims
+                     if c["ttl"] is not None
+                     and (c["ttl"] <= 0 or (now - c["ts"]) <= c["ttl"])]
             winner = min(alive, key=lambda c: c["claimed_at"]) if alive else None
             rows.append({
                 "work_id": wid,
@@ -1090,8 +1145,16 @@ class GitBusTransport(LocalJsonlBus):
             now = time.time()
             claimed_at, renew = now, False
             if lf.exists():
+                # Same class as _collect_leases (review 2026-09-04): the try below
+                # catches JSONDecodeError/OSError but NOT the ValueError a bare
+                # float() raises on a well-formed file with a string claimed_at —
+                # which made acquiring a lease crash on a corrupt prior claim of
+                # our OWN. Coerced instead, and an unreadable claimed_at falls back
+                # to `now`: never to 0.0, which would backdate our claim to the
+                # epoch and win every race by min(claimed_at).
                 try:
-                    claimed_at = float(json.loads(lf.read_text(encoding="utf-8")).get("claimed_at") or now)
+                    prior = json.loads(lf.read_text(encoding="utf-8"))
+                    claimed_at = _coerce_ts(prior.get("claimed_at"), _row_id=lf.stem) or now
                     renew = True
                 except (json.JSONDecodeError, OSError):
                     pass
@@ -1252,8 +1315,16 @@ class FileBusTransport(LocalJsonlBus):
             now = time.time()
             claimed_at, renew = now, False
             if lf.exists():
+                # Same class as _collect_leases (review 2026-09-04): the try below
+                # catches JSONDecodeError/OSError but NOT the ValueError a bare
+                # float() raises on a well-formed file with a string claimed_at —
+                # which made acquiring a lease crash on a corrupt prior claim of
+                # our OWN. Coerced instead, and an unreadable claimed_at falls back
+                # to `now`: never to 0.0, which would backdate our claim to the
+                # epoch and win every race by min(claimed_at).
                 try:
-                    claimed_at = float(json.loads(lf.read_text(encoding="utf-8")).get("claimed_at") or now)
+                    prior = json.loads(lf.read_text(encoding="utf-8"))
+                    claimed_at = _coerce_ts(prior.get("claimed_at"), _row_id=lf.stem) or now
                     renew = True
                 except (json.JSONDecodeError, OSError):
                     pass
