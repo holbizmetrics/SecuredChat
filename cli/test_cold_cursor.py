@@ -125,6 +125,36 @@ def main():
               "4 historical" in out and "2 addressed to you" in out
               and "2 broadcast" in out)
 
+    # ---- THE REPLAY IS BOUNDED (added 2026-09-05, second-order fix) ------- #
+    # Bare-name addressing means directed messages accumulate forever: measured on
+    # the live bus, a fresh windows-claude would inherit 54 and a fresh
+    # linux-claude 55, oldest three weeks back. Replaying all of them would
+    # re-create the defect this file exists to fix -- another session reported a
+    # cold cursor handing it "831 pending" and called it pure noise. The cap is on
+    # COUNT, not age, because an age threshold would be a number invented about
+    # data nobody measured.
+    with tempfile.TemporaryDirectory() as tmp:
+        bus = make_bus(tmp)
+        cfg = pathlib.Path(tmp) / "cfg"; cfg.mkdir()
+        seed(bus, [("peer", "capped-claude", f"directed message {i}") for i in range(12)])
+        env_cap = dict(os.environ, SECUREDCHAT_COLD_MAX="3")
+        r = subprocess.run(
+            [sys.executable, str(CHAT), "--bus", str(bus), "--room", "r",
+             "--identity", "capped-claude-7777", "--transport", "file",
+             "recv", "--summary"],
+            capture_output=True, text=True,
+            env={**env_cap, "XDG_CONFIG_HOME": str(cfg), "HOME": str(cfg)})
+        out = r.stdout
+        check("THE CASE: the directed replay is CAPPED, not unbounded",
+              "3 pending" in out)
+        check("the notice names how many were suppressed, so nothing is hidden",
+              "9 older NOT shown" in out)
+        check("the verdict line carries it too", "9 of them older and NOT shown" in out)
+        check("CONTROL: the MOST RECENT are the ones kept",
+              "directed message 11" in out and "directed message 0" not in out)
+        check("CONTROL: the full total is still reported",
+              "12 addressed to you" in out)
+
     # ---- WARM CURSOR: the fix must not make ordinary verdicts noisy -------- #
     with tempfile.TemporaryDirectory() as tmp:
         bus = make_bus(tmp)

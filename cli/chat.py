@@ -34,6 +34,10 @@ CONFIG_ENV_ROOM = "SECUREDCHAT_ROOM"
 CONFIG_ENV_ID = "SECUREDCHAT_IDENTITY"
 CONFIG_ENV_TRANSPORT = "SECUREDCHAT_TRANSPORT"
 CONFIG_ENV_VERIFY_SIG = "SECUREDCHAT_VERIFY_SIG"  # off|warn|strict fleet-wide default for recv/watch
+# How many cold-anchor directed messages a fresh identity replays (see cmd_recv).
+# Bare-name addressing means these accumulate forever; the cap bounds the output
+# and the suppressed count is always printed. Override: SECUREDCHAT_COLD_MAX.
+COLD_DIRECTED_MAX = int(os.environ.get("SECUREDCHAT_COLD_MAX", "10"))
 CONFIG_ENV_SIG_V2 = "SECUREDCHAT_SIG_V2"          # truthy -> SIGN with payload v2 (room/bus-bound); flag-day flips this fleet-wide
 CONFIG_ENV_REQUIRE_SIG_V2 = "SECUREDCHAT_REQUIRE_SIG_V2"  # truthy -> valid v1 sigs classify LEGACY_SIG (post-flag-day policy)
 
@@ -578,7 +582,7 @@ def cmd_recv(args: argparse.Namespace) -> None:
     fresh_anchor = (args.since is None and since is None
                     and not getattr(args, "from_start", False))
     msgs = t.recv(since_id=since)
-    cold_skipped = cold_directed = cold_broadcast = 0
+    cold_skipped = cold_directed = cold_broadcast = cold_older = 0
     if fresh_anchor and msgs:
         # Fresh identity (no cursor anywhere): anchor at HEAD instead of replaying
         # the room's whole history as "pending" (the cold-cursor boot noise).
@@ -604,12 +608,26 @@ def cmd_recv(args: argparse.Namespace) -> None:
         cold_skipped = len(msgs)
         cold_directed = len(directed)
         cold_broadcast = cold_skipped - cold_directed
+        # BOUND THE REPLAY. `_addressed_to` bare-matches, so a message sent to
+        # "windows-claude" matches every windows-claude-<token> FOREVER. Measured
+        # on the live bus 2026-09-05: a fresh windows-claude would inherit 54 such
+        # messages, a fresh linux-claude 55, oldest from 2026-08-17, and the count
+        # only grows. Surfacing all of them would re-create the defect this whole
+        # change exists to fix -- one session reported a cold cursor handing it
+        # "831 pending" and called it pure noise, which it was.
+        # The cap is on COUNT, not age: an age threshold would be a number invented
+        # about data nobody has measured. Nothing is hidden silently -- the total
+        # and the suppressed count both travel in the notice and in the verdict.
+        cold_shown = directed[-COLD_DIRECTED_MAX:]
+        cold_older = cold_directed - len(cold_shown)
         print(f"securedchat: fresh identity {identity!r} — cursor anchored at HEAD "
               f"({head[:8]}); {cold_skipped} historical message(s): "
-              f"{cold_directed} addressed to you (SHOWN below), "
-              f"{cold_broadcast} broadcast/other (skipped; replay: --from-start)",
+              f"{cold_directed} addressed to you"
+              + (f" (showing {len(cold_shown)} most recent, {cold_older} older NOT shown)"
+                 if cold_older else " (SHOWN below)")
+              + f", {cold_broadcast} broadcast/other (skipped; replay: --from-start)",
               file=(sys.stderr if args.json else sys.stdout))
-        msgs = directed
+        msgs = cold_shown
     if not t.last_pull_ok:
         # R2: surface staleness on the SAME stream as the result (stdout for
         # human/monitor output; stderr under --json to keep the stream parseable)
@@ -643,8 +661,9 @@ def cmd_recv(args: argparse.Namespace) -> None:
         # not "nothing is waiting for you". See the incident note above.
         if cold_skipped:
             print(f"{len(msgs)} pending (cold anchor: {cold_skipped} historical — "
-                  f"{cold_directed} addressed to you, {cold_broadcast} broadcast "
-                  f"NOT shown; replay: --from-start)")
+                  f"{cold_directed} addressed to you"
+                  + (f", {cold_older} of them older and NOT shown" if cold_older else "")
+                  + f", {cold_broadcast} broadcast NOT shown; replay: --from-start)")
         else:
             print(f"{len(msgs)} pending")
         for m in msgs:
