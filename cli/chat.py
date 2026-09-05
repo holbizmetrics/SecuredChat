@@ -578,17 +578,38 @@ def cmd_recv(args: argparse.Namespace) -> None:
     fresh_anchor = (args.since is None and since is None
                     and not getattr(args, "from_start", False))
     msgs = t.recv(since_id=since)
+    cold_skipped = cold_directed = cold_broadcast = 0
     if fresh_anchor and msgs:
         # Fresh identity (no cursor anywhere): anchor at HEAD instead of replaying
         # the room's whole history as "pending" (the cold-cursor boot noise).
-        # Loud, never silent (R1 principle kept): count + replay path printed.
+        #
+        # INCIDENT 2026-09-05 (termux-claude-4c248004, MilleniumProblems RH): this
+        # anchoring told a fresh session "0 pending" while 2,911 messages sat
+        # unread, one of them a broadcast telling it the work it was about to do
+        # had already been done by another box. It did that work anyway — a full
+        # session of mathematics, duplicated. The count WAS printed here; it just
+        # never reached the verdict line, which said a bare "0 pending". A gate
+        # word computed from something other than the gated quantity.
+        #
+        # Two changes, and the first matters more than the second:
+        #  1. A message a peer EXPLICITLY ADDRESSED to this identity is never room
+        #     noise, so it is no longer skipped. Broadcasts still are — a newcomer
+        #     is not owed a room's whole history — but they are COUNTED, and the
+        #     count travels to the verdict, which is what makes a reader go look.
+        #  2. The verdict line can no longer say a bare "0 pending" after a cold
+        #     anchor (see `args.summary` below).
         head = msgs[-1].id
         _write_last_seen(identity, room, head)
+        directed = [m for m in msgs if m.to is not None and _addressed_to(identity, m.to)]
+        cold_skipped = len(msgs)
+        cold_directed = len(directed)
+        cold_broadcast = cold_skipped - cold_directed
         print(f"securedchat: fresh identity {identity!r} — cursor anchored at HEAD "
-              f"({head[:8]}); {len(msgs)} historical message(s) skipped "
-              f"(replay: --from-start or --since <id>)",
+              f"({head[:8]}); {cold_skipped} historical message(s): "
+              f"{cold_directed} addressed to you (SHOWN below), "
+              f"{cold_broadcast} broadcast/other (skipped; replay: --from-start)",
               file=(sys.stderr if args.json else sys.stdout))
-        msgs = []
+        msgs = directed
     if not t.last_pull_ok:
         # R2: surface staleness on the SAME stream as the result (stdout for
         # human/monitor output; stderr under --json to keep the stream parseable)
@@ -617,7 +638,15 @@ def cmd_recv(args: argparse.Namespace) -> None:
             print(f"securedchat: acked {len(_to_ack)} message(s)",
                   file=(sys.stderr if args.json else sys.stdout))
     if args.summary:
-        print(f"{len(msgs)} pending")
+        # The verdict carries the gated quantity. After a cold anchor a bare
+        # "0 pending" is false — it means "0 since an anchor set one second ago",
+        # not "nothing is waiting for you". See the incident note above.
+        if cold_skipped:
+            print(f"{len(msgs)} pending (cold anchor: {cold_skipped} historical — "
+                  f"{cold_directed} addressed to you, {cold_broadcast} broadcast "
+                  f"NOT shown; replay: --from-start)")
+        else:
+            print(f"{len(msgs)} pending")
         for m in msgs:
             print(_summary_line(m, args.summary_width))
         return

@@ -1034,8 +1034,18 @@ def test_addressing_and_owed(root: Path) -> None:
         with contextlib.redirect_stdout(out):
             chat.cmd_recv(ns_r)
         o = out.getvalue()
-        check("anchored at HEAD" in o and "0 pending" in o,
-              "fresh identity: anchored at HEAD, no backlog replay")
+        # ASSERTION UPDATED 2026-09-05, and the contract it checks CHANGED.
+        # It used to require a bare "0 pending". That is what let a fresh termux
+        # session read 2,911 unread messages as an empty backlog and duplicate a
+        # full session of another box's work. The cold anchor still refuses to
+        # replay a room's history (the point of this test, preserved by the
+        # broadcast arm below), but a message a peer ADDRESSED to this identity
+        # is not history, and the verdict now carries the skipped counts.
+        # Full coverage of the new contract lives in test_cold_cursor.py.
+        check("anchored at HEAD" in o and "cold anchor:" in o,
+              "fresh identity: anchors at HEAD and the verdict names the backlog")
+        check("broadcast" in o and "NOT shown" in o,
+              "fresh identity: broadcast history still NOT replayed")
         out = io.StringIO()
         ns_r2 = Namespace(**{**vars(ns_r), "identity": "termux-claude-99991111",
                              "from_start": True})

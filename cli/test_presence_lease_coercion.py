@@ -105,8 +105,14 @@ def main():
               len(rows) == 1 and rows[0]["holder"] == "alice" and rows[0]["alive"])
 
         # THE CASE: bad ts on a DIFFERENT work_id must not kill the read.
+        # The ISO string is generated from NOW, not hardcoded. Written first as a
+        # literal "2026-09-04T09:00:00Z"; the arm asserts the lease is ALIVE, so a
+        # fixed date meant the test passed only on the day it was written and went
+        # red 17h later. A test whose verdict depends on the wall clock is the
+        # clock-before-claim defect wearing a corpus.
+        iso_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
         (t.lease_dir / "w2__bob.json").write_text(json.dumps(
-            {"work_id": "w2", "holder": "bob", "ts": "2026-09-04T09:00:00Z", "ttl": 600}))
+            {"work_id": "w2", "holder": "bob", "ts": iso_now, "ttl": 600}))
         try:
             rows = t._collect_leases()
             crashed = False
@@ -143,6 +149,8 @@ def main():
         # not backdate us to the epoch.
         t2 = FileBusTransport(pathlib.Path(tmp), "r", "carol")
         (t2._lease_file("w4")).write_text(json.dumps(
+            # fixed date is SAFE here: this arm asserts claimed_at is not
+            # backdated to the epoch, which does not depend on how old it is.
             {"work_id": "w4", "holder": "carol", "claimed_at": "2026-09-04T09:00:00Z",
              "ts": now, "ttl": 600}))
         try:
