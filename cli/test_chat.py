@@ -1176,6 +1176,52 @@ def test_signing_v2(root: Path) -> None:
             os.environ["SECUREDCHAT_HOME"] = old_home
 
 
+def test_broadcast_literal_footgun(root: Path) -> None:
+    """`--to broadcast` is a fleet-wide dead-letter address (every monitor's addressee
+    set is {None, own-id, bare-name}; measured 25e16db5, 0 replies, 2026-08-19).
+    cmd_send now coerces it to a room broadcast (to=None) with a stderr notice.
+    NEGATIVE case: a real recipient must still be written literally unchanged —
+    proves the guard can fail, per the courier row's verifier spec."""
+    print("test_broadcast_literal_footgun ('--to broadcast' coerced at creation, real --to untouched)")
+    import contextlib
+    import io
+    from argparse import Namespace
+
+    d = make_file_bus(root, "broadcast_footgun_bus")
+    me = "termux-claude-12340000"
+
+    def _send(to: str | None, body: str) -> str:
+        ns = Namespace(bus=str(d), room="r", identity=me, transport="file",
+                       body=body, to=to, kind="msg", reply_to=None,
+                       json=False, no_sign=True)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            chat.cmd_send(ns)
+        return err.getvalue()
+
+    t = FileBusTransport(d, "r", me)
+
+    err = _send("broadcast", "wake everyone")
+    stored = [m for m in t.recv(since_id=None) if m.body == "wake everyone"]
+    check(bool(stored) and stored[0].to is None,
+          "send: --to broadcast coerced to room broadcast (to=None on the wire)")
+    check("dead-letter" in err and "omits --to" in err,
+          "send: coercion prints the notice naming the correct form")
+    err = _send("  Broadcast ", "case and whitespace")
+    stored = [m for m in t.recv(since_id=None) if m.body == "case and whitespace"]
+    check(bool(stored) and stored[0].to is None,
+          "send: coercion is case/whitespace-insensitive")
+
+    # NEGATIVE: a real peer address must pass through byte-identical — the guard
+    # must be able to NOT fire, or it is rewriting everyone's envelopes.
+    err = _send("linux-claude-55345575", "just for you")
+    stored = [m for m in t.recv(since_id=None) if m.body == "just for you"]
+    check(bool(stored) and stored[0].to == "linux-claude-55345575",
+          "NEGATIVE: a real --to recipient is written literally unchanged")
+    check("dead-letter" not in err,
+          "NEGATIVE: no coercion notice for a real recipient")
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="securedchat-test-"))
     try:
@@ -1201,6 +1247,7 @@ def main() -> int:
         test_signing_hardening(root)
         test_signing_v2(root)
         test_addressing_and_owed(root)
+        test_broadcast_literal_footgun(root)
     finally:
         _rm(root)
     print()

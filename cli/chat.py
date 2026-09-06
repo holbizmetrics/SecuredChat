@@ -509,6 +509,16 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not body.strip():
         sys.exit("refusing to send empty message")
     t, room, identity = _build_transport(args)
+    if args.to and args.to.strip().lower() == "broadcast":
+        # 'broadcast' is not an address: every monitor's addressee set is {None, own-id,
+        # bare-name}, so to='broadcast' is a fleet-wide dead-letter (measured: 25e16db5 got
+        # 0 replies, 2026-08-19). The broadcast form is OMITTING --to; coerce to what the
+        # sender meant and say so. A real peer named literally 'broadcast' cannot exist on
+        # this fleet for the same reason nobody wakes on it.
+        print("securedchat: NOTICE --to broadcast is a dead-letter address (no monitor wakes "
+              "on it); sending as a room broadcast instead — the correct form omits --to",
+              file=sys.stderr)
+        args.to = None
     if args.to:
         _warn_stale_target(t, args.to)
     else:
