@@ -519,16 +519,32 @@ class LocalJsonlBus(Transport):
         lock_path = self.chat_file.parent / ".send.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.time() + timeout
+        # A LIVE holder on Windows cannot be broken (unlink -> WinError 32), so
+        # contention against it would otherwise spin forever in silence. Past
+        # this second deadline the lock is reported held, loudly, not spun on.
+        hard_deadline = deadline + timeout
         fd = None
         while True:
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 break
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # FileExistsError: the ordinary held-lock signal (POSIX and Windows).
+                # PermissionError (EACCES): Windows raises THIS instead when another
+                # process currently holds .send.lock open -- observed 2026-08-28
+                # killing a two-day bus monitor (PCLA courier row 305). Both mean
+                # "held": same back-off, same stale-break, same loud timeout.
+                if time.time() > hard_deadline:
+                    raise TimeoutError(
+                        f"send lock {lock_path} held by a live process for more than "
+                        f"{2 * timeout:.0f}s -- giving up rather than spinning; if no "
+                        f"other process is running, remove the file by hand")
                 try:
                     age = time.time() - lock_path.stat().st_mtime
                 except FileNotFoundError:
                     continue
+                except PermissionError:
+                    age = 0.0   # Windows may refuse the stat too while it is held: treat as fresh
                 if age > timeout or time.time() > deadline:
                     try:
                         lock_path.unlink(missing_ok=True)  # break stale lock, then retry

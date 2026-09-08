@@ -761,6 +761,70 @@ def test_send_lock_windows_permission_error(root: Path) -> None:
     check(elapsed < 3.0, f"_send_lock returns within timeout after retry (elapsed={elapsed:.2f}s)")
 
 
+def test_send_lock_permission_error_on_acquire(root: Path) -> None:
+    """PCLA courier row 305: Windows raises PermissionError (EACCES) from os.open
+    itself when another process holds .send.lock -- not FileExistsError -- and a
+    two-day bus monitor died of it. A transiently held lock must yield
+    retry-then-success; a PERSISTENTLY held one must time out LOUD, never spin.
+    """
+    import os as _os
+    from unittest.mock import patch
+    repo = make_bus(root, "winacq")
+    t = GitBusTransport(repo, "relay", "alice")
+    lock_path = t.chat_file.parent / ".send.lock"
+
+    real_open = _os.open
+    calls = {"n": 0}
+
+    def flaky_open(path, flags, *a, **kw):
+        if str(path) == str(lock_path) and calls["n"] < 3:
+            calls["n"] += 1
+            raise PermissionError(13, "EACCES simulated: held by another process")
+        return real_open(path, flags, *a, **kw)
+
+    with patch.object(_os, "open", flaky_open):
+        t0 = time.time()
+        try:
+            with t._send_lock(timeout=2.0):
+                acquired = True
+            crashed = False
+        except PermissionError:
+            acquired = False
+            crashed = True
+        elapsed = time.time() - t0
+    check(not crashed and acquired, "transient EACCES on acquire: retry then success, no crash")
+    check(calls["n"] == 3, f"EACCES simulated exactly 3 times before success (got {calls['n']})")
+    check(elapsed < 2.0, f"acquired after brief back-off (elapsed={elapsed:.2f}s)")
+    check(not lock_path.exists(), "lock released after the block")
+
+    # negative: a persistently held lock (open AND unlink both refused, as on
+    # Windows with a live holder) must give up LOUD within ~2x timeout
+    def held_open(path, flags, *a, **kw):
+        if str(path) == str(lock_path):
+            raise PermissionError(13, "EACCES simulated: held forever")
+        return real_open(path, flags, *a, **kw)
+
+    real_unlink = Path.unlink
+
+    def held_unlink(self: Path, *a, **kw):
+        if self == lock_path:
+            raise PermissionError(32, "WinError 32 simulated: holder alive")
+        return real_unlink(self, *a, **kw)
+
+    with patch.object(_os, "open", held_open), patch.object(Path, "unlink", held_unlink):
+        t0 = time.time()
+        try:
+            with t._send_lock(timeout=0.5):
+                pass
+            loud = None
+        except TimeoutError as e:
+            loud = str(e)
+        elapsed = time.time() - t0
+    check(loud is not None and ".send.lock" in loud and "live process" in loud,
+          f"persistently held lock times out LOUD naming the lock (got {loud!r})")
+    check(elapsed < 3.0, f"...and within ~2x timeout, not forever (elapsed={elapsed:.2f}s)")
+
+
 def _rm(path: Path) -> None:
     def onerr(func, p, exc):
         try:
@@ -1233,6 +1297,7 @@ def main() -> int:
         test_webrtc_signaling_guard(root)
         test_webrtc_loopback(root)
         test_send_lock_windows_permission_error(root)
+        test_send_lock_permission_error_on_acquire(root)
         test_signing(root)
         test_signing_hardening(root)
         test_signing_v2(root)
