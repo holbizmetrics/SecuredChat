@@ -425,11 +425,14 @@ class LocalJsonlBus(Transport):
             deduped.append(m)
         return deduped
 
-    def _id_resolves(self, since_id: str) -> bool:
-        """True iff `since_id` uniquely matches a message currently in the log
-        (full history). Used by watch to tell a stale cursor (re-anchor) apart
-        from a valid cursor with simply no new messages (keep waiting)."""
-        matches = [m for m in self._read_all(include_archive=True) if m.id.startswith(since_id)]
+    def _id_resolves(self, since_id: str, include_archive: bool = True) -> bool:
+        """True iff `since_id` uniquely matches a message currently in the log.
+        Default: full history (archive + active) -- used by watch to tell a stale
+        cursor (re-anchor) apart from a valid cursor with simply no new messages.
+        include_archive=False: the LIVE log only -- used by legacy-cursor adoption,
+        where an id that survives only in archive/ is months old and adopting it
+        replays the whole room on every boot (PCLA row 390)."""
+        matches = [m for m in self._read_all(include_archive=include_archive) if m.id.startswith(since_id)]
         return len(matches) == 1
 
     def _recv_resolved(self, since_id: str | None) -> list[Message]:

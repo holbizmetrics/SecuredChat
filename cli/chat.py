@@ -218,6 +218,13 @@ def _resolve_since(t: "GitBusTransport", identity: str, room: str) -> str | None
     showed a false "0 pending" (R1). No scoped cursor and no resolvable legacy
     → None = full history (summary-bounded). Fail toward showing too much, never
     toward a silent miss.
+
+    "Resolves" means resolves in the LIVE log. An id that only survives in the
+    room's archive/ is a cursor from before the last compaction -- months old on
+    a real bus -- and adopting it pinned every fresh identity on that box to a
+    replay of the whole room since then (789 "pending" that were addressed to
+    nobody; PCLA row 390). Such a legacy id is treated as unresolvable: the
+    fresh identity anchors at HEAD like one with no legacy file at all.
     """
     scoped = _read_last_seen(identity, room)
     if scoped is not None:
@@ -226,7 +233,7 @@ def _resolve_since(t: "GitBusTransport", identity: str, room: str) -> str | None
         legacy = LEGACY_LAST_SEEN_FILE.read_text().strip() or None
     except FileNotFoundError:
         legacy = None
-    if legacy and t._id_resolves(legacy):
+    if legacy and t._id_resolves(legacy, include_archive=False):
         _write_last_seen(identity, room, legacy)  # complete the migration, scoped
         return legacy
     return None

@@ -137,6 +137,26 @@ def test_resolve_since_migration(root: Path) -> None:
     check(chat._read_last_seen("alice", "relay") == msgs[0].id,
           "adopted legacy persisted as scoped cursor")
 
+    # PCLA row 390: a legacy id that survives ONLY in archive/ is NOT adopted by a
+    # fresh identity (it would replay the whole room since the compaction), while
+    # the same mechanism still adopts an id that is in the LIVE log (the control:
+    # that adoption is the migration this code exists for).
+    more = [send(t, "alice", f"m{i}") for i in range(3, 6)]
+    t.compact(keep_last=3)  # m0..m2 -> archive/, m3..m5 stay live
+    check(t._id_resolves(msgs[0].id, include_archive=True) is True
+          and t._id_resolves(msgs[0].id, include_archive=False) is False,
+          "planted id really is archive-only (resolves with archive, not without)")
+    chat.LEGACY_LAST_SEEN_FILE.write_text(msgs[0].id + "\n")
+    check(chat._resolve_since(t, "bob", "relay") is None,
+          "fresh identity + archive-only legacy id -> None (anchors at HEAD, not a replay)")
+    check(chat._read_last_seen("bob", "relay") is None,
+          "archive-only legacy id NOT persisted as bob's scoped cursor")
+    chat.LEGACY_LAST_SEEN_FILE.write_text(more[0].id + "\n")
+    check(chat._resolve_since(t, "bob", "relay") == more[0].id,
+          "control: live-log legacy id is still adopted by a fresh identity")
+    check(chat._read_last_seen("bob", "relay") == more[0].id,
+          "control: live-log adoption persisted scoped")
+
 
 def test_recv_since_and_fastpath(root: Path) -> None:
     print("test_recv_since_and_fastpath")
