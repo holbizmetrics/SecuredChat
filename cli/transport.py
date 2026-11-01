@@ -622,7 +622,9 @@ class LocalJsonlBus(Transport):
             except (json.JSONDecodeError, OSError):
                 continue
             ts = float(d.get("ts") or 0.0)
-            rows.append({"identity": d.get("identity") or pf.stem, "ts": ts, "age": now - ts})
+            title = d.get("title")
+            rows.append({"identity": d.get("identity") or pf.stem, "ts": ts, "age": now - ts,
+                         "title": title if isinstance(title, str) and title else None})
         rows.sort(key=lambda r: r["ts"], reverse=True)
         return rows
 

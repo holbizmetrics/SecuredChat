@@ -807,11 +807,38 @@ def presence_state(beat_age: float, msg_age: float | None,
     return "idle"
 
 
+def _presence_title(raw: str | None) -> str | None:
+    """The operator's name for a session's window (e.g. its Claude Code chat title).
+
+    Peers otherwise GUESS it: on 2026-11-01 a phone session addressed 'pcla-work' -- a bus
+    identity dead for 57 days -- because all it knew was the operator's chat title 'pcla-works'.
+    Carried in the presence file so `presence --find <title>` resolves it to an identity."""
+    if raw is None:
+        return None
+    title = " ".join(raw.split())
+    if not title or len(title) > 64:
+        raise SystemExit("securedchat: --title must be 1-64 characters after trimming")
+    return title
+
+
 def cmd_presence(args: argparse.Namespace) -> None:
     t, _, identity = _build_transport(args)
+    title = _presence_title(getattr(args, "title", None))
+    meta = {"title": title} if title else None
+    if getattr(args, "find", None):
+        wanted = " ".join(args.find.split()).casefold()
+        hits = [r for r in t.read_presence() if (r.get("title") or "").casefold() == wanted]
+        if not hits:
+            print(f"no live identity carries the title '{args.find}' (titles come only from "
+                  f"`presence --title`; an untitled session cannot be found this way)",
+                  file=sys.stderr)
+            sys.exit(1)
+        for r in hits:
+            print(f"{r['identity']}  (last seen {_fmt_age(r['age'])} ago)")
+        return
     if args.once:
-        t.announce_presence()
-        print(f"presence announced: {identity}")
+        t.announce_presence(meta)
+        print(f"presence announced: {identity}" + (f" (title '{title}')" if title else ""))
         return
     if args.beat:
         print(f"presence heartbeat every {args.interval:g}s for {identity} "
@@ -819,7 +846,7 @@ def cmd_presence(args: argparse.Namespace) -> None:
         try:
             while True:
                 try:
-                    t.announce_presence()
+                    t.announce_presence(meta)
                 except RuntimeError as e:
                     # Review 2026-09-02: one push exhaustion (a ~8s blip) killed the
                     # heartbeat process and the identity read OFFLINE fleet-wide. A
@@ -855,8 +882,9 @@ def cmd_presence(args: argparse.Namespace) -> None:
         msg_age = (now - ts) if ts is not None else None
         state = presence_state(r["age"], msg_age, args.window, args.attention)
         attn = f"last msg {_fmt_age(msg_age)} ago" if ts else "no messages yet"
+        named = f" · title '{r['title']}'" if r.get("title") else ""
         print(f"{state:<9}  {r['identity']:<18} last seen {_fmt_age(r['age'])} ago"
-              f" · {attn}")
+              f" · {attn}{named}")
 
 
 def cmd_claim(args: argparse.Namespace) -> None:
@@ -1253,6 +1281,11 @@ def build_parser() -> argparse.ArgumentParser:
     s_pres.add_argument("--attention", type=float, default=300.0,
                         help="seconds within which a last message counts as 'attending' vs "
                              "'idle' (fresh beat but no recent message = nobody reading; default 300)")
+    s_pres.add_argument("--title", default=None,
+                        help="with --once/--beat: the operator's name for this window (e.g. the "
+                             "chat title), so peers can find this identity instead of guessing it")
+    s_pres.add_argument("--find", default=None, metavar="TITLE",
+                        help="print the identity(ies) whose presence carries TITLE; exit 1 if none")
     s_pres.set_defaults(func=cmd_presence)
 
     s_claim = sub.add_parser(
