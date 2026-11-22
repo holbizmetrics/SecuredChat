@@ -300,6 +300,12 @@ def _warn_stale_target(t, to: str) -> None:
         pass
     bare = _bare_of(to)
     hint = f" — if that session ended, address the bare name: --to {bare}" if bare else ""
+    # G17 (PCLA, 2026-11-22): the ages above come from THIS clone. If the pull failed they are
+    # computed from the last successful pull, which can only make the target look OLDER than it
+    # is -- a live peer reads as gone. Say so instead of stating an age as if it were current.
+    if not getattr(t, "last_pull_ok", True):
+        hint += (" [pull FAILED: computed from this clone's last successful pull -- the target "
+                 "may be fresher than this says]")
     if not ages:
         print(f"securedchat: WARNING no presence record for target {to!r}; it may be "
               f"a dead/rotated session token and nobody may ever read this{hint}",

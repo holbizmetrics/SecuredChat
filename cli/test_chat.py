@@ -1161,6 +1161,37 @@ def test_addressing_and_owed(root: Path) -> None:
     check(err.getvalue() == "",
           "send guard: fresh MESSAGE counts as liveness (no false last-seen warning)")
 
+    # 4) G17 (PCLA 2026-11-22, Astra's control): the guard reads presence AT DECISION TIME --
+    #    a fixture that goes active -> inactive after the first read must be seen on the next call.
+    pdir = t_me.presence_dir
+    pdir.mkdir(parents=True, exist_ok=True)
+    pf = pdir / "fixture-claude-12345678.json"
+    pf.write_text(json.dumps({"identity": "fixture-claude-12345678", "ts": time.time(),
+                              "kind": "presence"}), encoding="utf-8")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        chat._warn_stale_target(t_me, "fixture-claude-12345678")
+    check(err.getvalue() == "", "G17: fresh fixture -> silent")
+    pf.write_text(json.dumps({"identity": "fixture-claude-12345678", "ts": time.time() - 7200,
+                              "kind": "presence"}), encoding="utf-8")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        chat._warn_stale_target(t_me, "fixture-claude-12345678")
+    check("last seen 2h" in err.getvalue(),
+          "G17: SAME target gone stale after the first read -> the next call sees it (no cached verdict)")
+    check("pull FAILED" not in err.getvalue(),
+          "G17 NEGATIVE: a successful read carries no pull-failed caveat")
+    # 5) a failed pull must be SAID: the age then comes from an old clone and can only overstate it
+    t_me.last_pull_ok = False
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            chat._warn_stale_target(t_me, "fixture-claude-12345678")
+        check("last seen 2h" in err.getvalue() and "pull FAILED" in err.getvalue(),
+              "G17: failed pull -> the stale-age warning names that it came from the last successful pull")
+    finally:
+        t_me.last_pull_ok = True
+
 
 def test_signing_v2(root: Path) -> None:
     """Wire-pair tag-blocker fix (2026-07-19): canonical_payload v2 binds
