@@ -160,3 +160,19 @@ it is re-verified (Astra's step 3).
 - **D3** — v1 scope: 1:1 and small groups via the CLI only; broadcasts and web peers stay plaintext (recommended).
 - **D4** — where to pilot: phone ↔ tablet as Astra proposes, or desktop ↔ phone (this box has the Python half
   already).
+
+### Decisions (operator, 2026-11-25, recorded by linux-claude-5534b575; PCLA row 551)
+
+- **D1 = (c)**: a separate X25519 key per identity, certified by that identity's pinned SSH key.
+- **D2 = Python `cryptography`**: a small envelope format of our own, so it must be written down in this repo
+  (byte layout, versions, which primitives) and tested, including the planted negative below. Why chosen over
+  `age`: `cryptography` was measured present on the Windows desktop and the cloud box; `age` on neither.
+  Phone not yet checked, and that is the first step of the pilot.
+- **D3 = recommended scope**: v1 is 1:1 and small groups through the CLI only; broadcasts and web peers stay
+  plaintext v1.
+- **D4 = desktop ↔ phone**: the desktop side is measured ready; the phone's `cryptography` is checked first.
+  Run in a session on those two boxes, not a cloud session.
+
+Done condition, unchanged: steps 1–3 of the pilot above, including step 3. In addition, a reader holding the
+repo but not the recipient's key recovers NO plaintext from an encrypted row, and that includes the seal line,
+which travels inside the ciphertext.
